@@ -4,13 +4,16 @@ W api.py: from catalog_api import router as catalog_router
 """
 import math
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+import httpx
 from fastapi import APIRouter, HTTPException, Query
 from psycopg.rows import dict_row
 from nasa_asteroid_service import db_connection, get_asteroids
 
 router = APIRouter(prefix='/api/catalog', tags=['Catalog & NASA'])
 NASA_URL = 'https://ssd-api.jpl.nasa.gov/sb_ident.api'
+NASA_SBDB_URL = 'https://ssd-api.jpl.nasa.gov/sbdb.api'
+NASA_HORIZONS_URL = 'https://ssd.jpl.nasa.gov/api/horizons.api'
 
 
 def like_pattern(text: str) -> str:
@@ -60,10 +63,229 @@ def _angular_sep_deg(ra1: float, dec1: float, ra2: float, dec2: float) -> float:
     return math.degrees(math.acos(cos_val))
 
 
+# ==============================================================================
+# FORMUŁOWANIE ZAPYTAŃ DO NASA JPL (SBDB + HORIZONS) PO NAZWIE OBIEKTU
+# ==============================================================================
+
+def _query_nasa_horizons_position(command: str, lat: float = 50.3, lon: float = 18.8, alt_km: float = 0.3) -> tuple[float | None, float | None, float | None]:
+    """Formułuje zapytanie do NASA JPL Horizons API po aktualne współrzędne RA/Dec i jasność Vmag."""
+    now = datetime.now(timezone.utc)
+    start_str = now.strftime('%Y-%m-%d %H:%M')
+    stop_str = (now + timedelta(minutes=2)).strftime('%Y-%m-%d %H:%M')
+
+    params = {
+        'format': 'json',
+        'COMMAND': f"'{command}'",
+        'OBJ_DATA': "'NO'",
+        'MAKE_EPHEM': "'YES'",
+        'EPHEM_TYPE': "'OBSERVER'",
+        'CENTER': "'coord@399'",
+        'COORD_TYPE': "'GEODETIC'",
+        'SITE_COORD': f"'{lon:.4f},{lat:.4f},{alt_km:.3f}'",
+        'START_TIME': f"'{start_str}'",
+        'STOP_TIME': f"'{stop_str}'",
+        'STEP_SIZE': "'1m'",
+        'QUANTITIES': "'1,9'",
+    }
+
+    try:
+        with httpx.Client(timeout=12.0) as client:
+            resp = client.get(NASA_HORIZONS_URL, params=params)
+            if resp.status_code != 200:
+                return None, None, None
+            data = resp.json()
+            result_txt = data.get('result', '')
+            if '$$SOE' not in result_txt or '$$EOE' not in result_txt:
+                return None, None, None
+
+            ephem_block = result_txt.split('$$SOE')[1].split('$$EOE')[0].strip()
+            first_line = ephem_block.splitlines()[0].strip()
+
+            # Wyciągamy pary HH MM SS.ss oraz [+-]DD MM SS.s z linii efemerydy
+            match = re.search(
+                r'(\d{2}\s+\d{2}\s+\d{2}(?:\.\d+)?)\s+([+-]?\d{2}\s+\d{2}\s+\d{2}(?:\.\d+)?)',
+                first_line,
+            )
+            if not match:
+                return None, None, None
+
+            ra_deg = ra_to_deg(match.group(1))
+            dec_deg = dec_to_deg(match.group(2))
+
+            # Próba odczytania Vmag po współrzędnych
+            tail = first_line[match.end():].split()
+            mag = None
+            for token in tail:
+                try:
+                    val = float(token)
+                    if -30.0 <= val <= 35.0:
+                        mag = val
+                        break
+                except ValueError:
+                    continue
+
+            return ra_deg, dec_deg, mag
+    except Exception as exc:
+        print('NASA HORIZONS QUERY WARN:', repr(exc))
+        return None, None, None
+
+
+def search_nasa_by_name(query_name: str, lat: float = 50.3, lon: float = 18.8) -> list[dict]:
+    """Formułuje zapytanie do NASA JPL SBDB oraz Horizons dla wpisanej frazy (asteroidy, komety, planety)."""
+    clean_name = query_name.strip()
+    if not clean_name:
+        return []
+
+    found_candidates = []
+
+    # 1. Zapytanie do NASA JPL Small-Body Database (SBDB) - rozpoznaje nazwy, oznaczenia i fragmenty nazw
+    try:
+        with httpx.Client(timeout=10.0) as client:
+            sbdb_resp = client.get(NASA_SBDB_URL, params={'sstr': clean_name, 'phys-par': '1'})
+            if sbdb_resp.status_code == 200:
+                payload = sbdb_resp.json()
+                # Przypadek A: dokładne trafienie pojedynczego obiektu
+                if 'object' in payload:
+                    obj = payload['object']
+                    orbit_cls = (obj.get('orbit_class') or {}).get('name', 'Small Body')
+                    fullname = obj.get('fullname') or obj.get('des') or clean_name
+                    des = str(obj.get('des') or obj.get('spkid') or clean_name)
+                    found_candidates.append({
+                        'name': fullname,
+                        'designation': des,
+                        'command': des,
+                        'object_type': 'comet' if obj.get('kind', '').startswith('c') else 'asteroid',
+                        'description': f"Obiekt NASA JPL SBDB ({orbit_cls}).",
+                    })
+                # Przypadek B: wiele pasujących obiektów (kod 300 Multiple Matches)
+                elif 'list' in payload:
+                    for item in payload['list'][:5]:
+                        pdes = str(item.get('pdes') or '').strip()
+                        nm = str(item.get('name') or pdes).strip()
+                        if pdes:
+                            found_candidates.append({
+                                'name': nm,
+                                'designation': pdes,
+                                'command': pdes,
+                                'object_type': 'asteroid',
+                                'description': f"Obiekt dopasowany w NASA JPL SBDB ({pdes}).",
+                            })
+    except Exception as exc:
+        print('NASA SBDB QUERY WARN:', repr(exc))
+
+    # 2. Jeśli SBDB nie zwróciło małego ciała (np. wpisano "Neptune", "Mars", "Jupiter", "Moon"),
+    # próbujemy bezpośrednio w NASA Horizons (obsługuje wszystkie planety i księżyce)
+    if not found_candidates:
+        planet_map = {
+            'mercury': ('199', 'Mercury', 'planet'),
+            'merkury': ('199', 'Mercury', 'planet'),
+            'venus': ('299', 'Venus', 'planet'),
+            'wenus': ('299', 'Venus', 'planet'),
+            'moon': ('301', 'Moon', 'satellite'),
+            'ksiezyc': ('301', 'Moon', 'satellite'),
+            'mars': ('499', 'Mars', 'planet'),
+            'jupiter': ('599', 'Jupiter', 'planet'),
+            'jowisz': ('599', 'Jupiter', 'planet'),
+            'saturn': ('699', 'Saturn', 'planet'),
+            'uranus': ('799', 'Uranus', 'planet'),
+            'uran': ('799', 'Uranus', 'planet'),
+            'neptune': ('899', 'Neptune', 'planet'),
+            'neptun': ('899', 'Neptune', 'planet'),
+            'pluto': ('999', 'Pluto', 'dwarf_planet'),
+            'pluton': ('999', 'Pluto', 'dwarf_planet'),
+        }
+        key = clean_name.casefold()
+        if key in planet_map:
+            cmd, canonical, otype = planet_map[key]
+            found_candidates.append({
+                'name': canonical,
+                'designation': cmd,
+                'command': cmd,
+                'object_type': otype,
+                'description': f"Planeta / obiekt Układu Słonecznego (NASA JPL Horizons).",
+            })
+        else:
+            found_candidates.append({
+                'name': clean_name,
+                'designation': clean_name,
+                'command': clean_name,
+                'object_type': 'celestial_object',
+                'description': f"Obiekt wyszukany w NASA JPL Horizons ({clean_name}).",
+            })
+
+    # 3. Dla każdego kandydata pobieramy aktualną pozycję RA/Dec z NASA Horizons i zapisujemy w bazie
+    resolved = []
+    now_utc = datetime.now(timezone.utc)
+
+    for cand in found_candidates[:3]:
+        ra_deg, dec_deg, mag = _query_nasa_horizons_position(cand['command'], lat=lat, lon=lon)
+        if ra_deg is None or dec_deg is None:
+            continue
+
+        obj_id = _upsert_nasa_search_result(
+            name=cand['name'],
+            designation=cand['designation'],
+            object_type=cand['object_type'],
+            description=cand['description'],
+            ra=ra_deg,
+            dec=dec_deg,
+            observed_at=now_utc,
+        )
+
+        resolved.append({
+            'id': str(obj_id),
+            'name': cand['name'],
+            'designation': cand['designation'],
+            'object_type': cand['object_type'],
+            'description': cand['description'],
+            'ra': ra_deg,
+            'dec': dec_deg,
+            'observed_at': now_utc.isoformat(),
+            'magnitude': mag if mag is not None else 13.5,
+            'images': [],
+            'data_source': 'nasa_jpl_horizons',
+            'position_current': True,
+        })
+
+    return resolved
+
+
+def _upsert_nasa_search_result(name: str, designation: str, object_type: str, description: str, ra: float, dec: float, observed_at: datetime) -> int:
+    """Zapisuje obiekt wyszukany w NASA JPL do celestial_objects oraz observations."""
+    with db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute('SELECT id FROM data_sources WHERE source_url=%s LIMIT 1', (NASA_HORIZONS_URL,))
+            row = cur.fetchone()
+            if row:
+                source_id = row[0]
+            else:
+                cur.execute(
+                    'INSERT INTO data_sources (name, provider, source_url) VALUES (%s,%s,%s) RETURNING id',
+                    ('NASA JPL Horizons & SBDB', 'NASA JPL', NASA_HORIZONS_URL),
+                )
+                source_id = cur.fetchone()[0]
+
+            cur.execute('SELECT id FROM celestial_objects WHERE name=%s LIMIT 1', (name,))
+            obj_row = cur.fetchone()
+            if obj_row:
+                obj_id = obj_row[0]
+            else:
+                cur.execute(
+                    'INSERT INTO celestial_objects (name, object_type, nasa_identifier, description) VALUES (%s,%s,%s,%s) RETURNING id',
+                    (name, object_type, designation, description),
+                )
+                obj_id = cur.fetchone()[0]
+
+            cur.execute(
+                'INSERT INTO observations (object_id, source_id, observed_at, ra, dec, wavelength_band, data_url) VALUES (%s,%s,%s,%s,%s,%s,%s)',
+                (obj_id, source_id, observed_at, ra, dec, 'Ephemeris-Optical', NASA_HORIZONS_URL),
+            )
+        conn.commit()
+    return obj_id
+
+
 def _cache_objects(cur, max_items=100):
-    """Tylko rozpoznawalne asteroidowe rekordy z cache JSONB.
-    Nie traktujemy wycinkow SPHEREx jako asteroid ani fotografii FITS jako JPG.
-    """
+    """Tylko rozpoznawalne asteroidowe rekordy z cache JSONB."""
     cur.execute("""
         SELECT response_data, fetched_at
         FROM asteroid_cache
@@ -208,7 +430,7 @@ def _list_db(name=None, ra=None, dec=None, radius=15, limit=50):
     combined = []
     with db_connection() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
-            # 1. Najpierw sprawdzamy wyróżniony katalog featured_sky_objects (np. Bennu, Neptune)
+            # 1. Wyróżniony katalog featured_sky_objects
             for f in _featured_rows(cur):
                 if terms:
                     haystack = f"{f['name']} {f['designation']} {f['object_type']}".casefold()
@@ -221,7 +443,7 @@ def _list_db(name=None, ra=None, dec=None, radius=15, limit=50):
                         continue
                 combined.append(f)
 
-            # 2. Następnie obiekty z tabeli celestial_objects
+            # 2. Tabela celestial_objects
             cur.execute(sql, params)
             for r in cur.fetchall():
                 combined.append({
@@ -239,7 +461,7 @@ def _list_db(name=None, ra=None, dec=None, radius=15, limit=50):
                     'position_current': False,
                 })
 
-            # 3. Jeśli szukamy po nazwie lub sektorze, sprawdzamy także asteroid_cache
+            # 3. Tabela asteroid_cache
             if len(combined) < limit:
                 for c in _cache_objects(cur, max_items=200):
                     if terms and not all(t.casefold() in c['name'].casefold() for t in terms):
@@ -248,14 +470,12 @@ def _list_db(name=None, ra=None, dec=None, radius=15, limit=50):
                         continue
                     combined.append(c)
 
-            # Uzupełniamy ewentualne zdjęcia z asteroid_details_cache
             if combined:
                 more_images = _detail_images(cur, [o['name'] for o in combined])
                 for obj in combined:
                     if not obj['images']:
                         obj['images'] = more_images.get(obj['name'].casefold(), [])
 
-    # Deduplikacja po nazwie (z zachowaniem pierwszeństwa dla featured_sky_objects)
     unique = []
     seen = set()
     for item in combined:
@@ -274,10 +494,36 @@ def get_catalog_objects(
     dec: float | None = Query(None, ge=-90, le=90),
     radius: float = Query(15, gt=0, le=180),
     limit: int = Query(50, ge=1, le=200),
+    lat: float = Query(50.3, ge=-90, le=90),
+    lon: float = Query(18.8, ge=-180, le=180),
+    query_nasa: bool = Query(True),
 ):
     try:
         rows = _list_db(name, ra, dec, radius, limit)
-        return {'source': 'local_db', 'count': len(rows), 'asteroids': rows}
+        source_tag = 'local_db'
+
+        # Gdy użytkownik szuka po nazwie, formułujemy również zapytanie do NASA JPL (SBDB + Horizons),
+        # aby dociągnąć nowe obiekty lub uzyskać aktualną na daną chwilę pozycję RA/Dec
+        if name and query_nasa:
+            nasa_hits = search_nasa_by_name(name, lat=lat, lon=lon)
+            if nasa_hits:
+                source_tag = 'nasa_jpl_and_local_db'
+                existing_keys = {r['name'].casefold() for r in rows}
+                # Aktualizujemy współrzędne RA/Dec na bieżące lub dodajemy nowe znaleziska z NASA na szczyt
+                merged = []
+                nasa_by_key = {n['name'].casefold(): n for n in nasa_hits}
+                for n in nasa_hits:
+                    # Zachowujemy obrazki z lokalnego katalogu jeśli istnieją
+                    local_match = next((r for r in rows if r['name'].casefold() == n['name'].casefold()), None)
+                    if local_match and local_match.get('images'):
+                        n['images'] = local_match['images']
+                    merged.append(n)
+                for r in rows:
+                    if r['name'].casefold() not in nasa_by_key:
+                        merged.append(r)
+                rows = merged[:limit]
+
+        return {'source': source_tag, 'count': len(rows), 'asteroids': rows}
     except HTTPException:
         raise
     except Exception as exc:
@@ -286,11 +532,17 @@ def get_catalog_objects(
 
 
 @router.get('/objects/details')
-def get_catalog_object_details(name: str = Query(..., min_length=1, max_length=100)):
+def get_catalog_object_details(
+    name: str = Query(..., min_length=1, max_length=100),
+    lat: float = Query(50.3, ge=-90, le=90),
+    lon: float = Query(18.8, ge=-180, le=180),
+):
     try:
         rows = _list_db(name=name, limit=20)
         if not rows:
-            raise HTTPException(status_code=404, detail='Brak obiektu w bazie')
+            rows = search_nasa_by_name(name, lat=lat, lon=lon)
+        if not rows:
+            raise HTTPException(status_code=404, detail='Brak obiektu w bazie oraz w NASA JPL')
         exact = next(
             (o for o in rows if o['name'].casefold() == name.casefold() or o['designation'].casefold() == name.casefold()),
             None,
@@ -316,11 +568,9 @@ def get_all_catalog_objects(
             with conn.cursor(row_factory=dict_row) as cur:
                 objects = []
 
-                # 1. Najpierw wyróżnione obiekty (w tym planety takie jak Neptune i asteroidy jak Bennu)
                 if include_featured:
                     objects.extend(_featured_rows(cur))
 
-                # 2. Obiekty z celestial_objects
                 cur.execute("""SELECT o.id, o.name, o.nasa_identifier AS designation,
                                       o.object_type, o.description, obs.ra, obs.dec, obs.observed_at,
                                       COALESCE(imgs.images, '[]'::json) AS images
@@ -359,7 +609,6 @@ def get_all_catalog_objects(
                     })
                     existing.add(obj_name.casefold())
 
-                # 3. Obiekty z asteroid_cache oraz uzupełnianie zdjęć
                 if include_cache:
                     cache = _cache_objects(cur, max_items=300)
                     objects.extend(x for x in cache if x['name'].casefold() not in existing)
