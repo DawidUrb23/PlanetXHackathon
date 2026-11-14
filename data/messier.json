@@ -1,0 +1,662 @@
+[
+  {
+    "id": "M1",
+    "name": "Crab Nebula",
+    "ra_hours": 5.575493333333335,
+    "dec_degrees": 22.0174
+  },
+  {
+    "id": "M2",
+    "name": "Messier 2",
+    "ra_hours": 21.557505533333337,
+    "dec_degrees": -0.82325
+  },
+  {
+    "id": "M3",
+    "name": "Messier 3",
+    "ra_hours": 13.703227800000002,
+    "dec_degrees": 28.377278
+  },
+  {
+    "id": "M4",
+    "name": "Messier 4",
+    "ra_hours": 16.39311666666667,
+    "dec_degrees": -26.52575
+  },
+  {
+    "id": "M5",
+    "name": "Rose Cluster",
+    "ra_hours": 15.309227800000004,
+    "dec_degrees": 2.081028
+  },
+  {
+    "id": "M6",
+    "name": "Butterfly Cluster",
+    "ra_hours": 17.670694666666673,
+    "dec_degrees": -32.23778
+  },
+  {
+    "id": "M7",
+    "name": "Ptolemy Cluster",
+    "ra_hours": 17.895583333333335,
+    "dec_degrees": -34.82667
+  },
+  {
+    "id": "M8",
+    "name": "Lagoon Nebula",
+    "ra_hours": 18.060280000000002,
+    "dec_degrees": -24.3867
+  },
+  {
+    "id": "M9",
+    "name": "Messier 9",
+    "ra_hours": 17.31993886666667,
+    "dec_degrees": -18.51625
+  },
+  {
+    "id": "M10",
+    "name": "Messier 10",
+    "ra_hours": 16.95251386666667,
+    "dec_degrees": -4.100306
+  },
+  {
+    "id": "M11",
+    "name": "Wild Duck Cluster",
+    "ra_hours": 18.851028000000003,
+    "dec_degrees": -6.27167
+  },
+  {
+    "id": "M12",
+    "name": "Messier 12",
+    "ra_hours": 16.787272200000004,
+    "dec_degrees": -1.948528
+  },
+  {
+    "id": "M13",
+    "name": "Great Hercules Cluster",
+    "ra_hours": 16.694898333333338,
+    "dec_degrees": 36.4613194
+  },
+  {
+    "id": "M14",
+    "name": "Messier 14",
+    "ra_hours": 17.626708333333337,
+    "dec_degrees": -3.245917
+  },
+  {
+    "id": "M15",
+    "name": "Great Pegasus Cluster",
+    "ra_hours": 21.499536133333336,
+    "dec_degrees": 12.167
+  },
+  {
+    "id": "M16",
+    "name": "Eagle Nebula",
+    "ra_hours": 18.312533333333334,
+    "dec_degrees": -13.792
+  },
+  {
+    "id": "M17",
+    "name": "Omega Nebula",
+    "ra_hours": 18.34638666666667,
+    "dec_degrees": -16.1717
+  },
+  {
+    "id": "M18",
+    "name": "Black Swan Cluster",
+    "ra_hours": 18.332278000000002,
+    "dec_degrees": -17.0725
+  },
+  {
+    "id": "M19",
+    "name": "Messier 19",
+    "ra_hours": 17.0438028,
+    "dec_degrees": -26.267944
+  },
+  {
+    "id": "M20",
+    "name": "Trifid Nebula",
+    "ra_hours": 18.045000000000005,
+    "dec_degrees": -22.9717
+  },
+  {
+    "id": "M21",
+    "name": "Webb's Cross",
+    "ra_hours": 18.069472000000005,
+    "dec_degrees": -22.5
+  },
+  {
+    "id": "M22",
+    "name": "Sagittarius Cluster",
+    "ra_hours": 18.606650000000002,
+    "dec_degrees": -23.90475
+  },
+  {
+    "id": "M23",
+    "name": "Messier 23",
+    "ra_hours": 17.94894466666667,
+    "dec_degrees": -18.9725
+  },
+  {
+    "id": "M24",
+    "name": "Sagittarius Star Cloud",
+    "ra_hours": 18.28,
+    "dec_degrees": -18.55
+  },
+  {
+    "id": "M25",
+    "name": "Messier 25",
+    "ra_hours": 18.529861333333336,
+    "dec_degrees": -19.12694
+  },
+  {
+    "id": "M26",
+    "name": "Messier 26",
+    "ra_hours": 18.75466666666667,
+    "dec_degrees": -9.38722
+  },
+  {
+    "id": "M27",
+    "name": "Dumbbell Nebula",
+    "ra_hours": 19.993434218058002,
+    "dec_degrees": 22.72119779431999
+  },
+  {
+    "id": "M28",
+    "name": "Messier 28",
+    "ra_hours": 18.409136133333337,
+    "dec_degrees": -24.869833
+  },
+  {
+    "id": "M29",
+    "name": "Cooling Tower",
+    "ra_hours": 20.395250000000004,
+    "dec_degrees": 38.49028
+  },
+  {
+    "id": "M30",
+    "name": "Messier 30",
+    "ra_hours": 21.67281113333334,
+    "dec_degrees": -23.179861
+  },
+  {
+    "id": "M31",
+    "name": "Andromeda Galaxy",
+    "ra_hours": 0.7123138866666668,
+    "dec_degrees": 41.26875
+  },
+  {
+    "id": "M32",
+    "name": "Le Gentil",
+    "ra_hours": 0.7116180000000001,
+    "dec_degrees": 40.86517
+  },
+  {
+    "id": "M33",
+    "name": "Triangulum Galaxy",
+    "ra_hours": 1.564137937478667,
+    "dec_degrees": 30.66017511198
+  },
+  {
+    "id": "M34",
+    "name": "Spiral Cluster",
+    "ra_hours": 2.7025280000000005,
+    "dec_degrees": 42.73389
+  },
+  {
+    "id": "M35",
+    "name": "Messier 35",
+    "ra_hours": 6.1520833333333345,
+    "dec_degrees": 24.3375
+  },
+  {
+    "id": "M36",
+    "name": "Pinwheel Cluster",
+    "ra_hours": 5.605500000000001,
+    "dec_degrees": 34.13389
+  },
+  {
+    "id": "M37",
+    "name": "Messier 37",
+    "ra_hours": 5.871833333333335,
+    "dec_degrees": 32.54333
+  },
+  {
+    "id": "M38",
+    "name": "Starfish Cluster",
+    "ra_hours": 5.477778000000001,
+    "dec_degrees": 35.81889
+  },
+  {
+    "id": "M39",
+    "name": "Messier 39",
+    "ra_hours": 21.517778000000003,
+    "dec_degrees": 48.29639
+  },
+  {
+    "id": "M40",
+    "name": "Winnecke 4",
+    "ra_hours": 12.370000000000003,
+    "dec_degrees": 58.083
+  },
+  {
+    "id": "M41",
+    "name": "Little Beehive Cluster",
+    "ra_hours": 6.767528000000001,
+    "dec_degrees": -20.71861
+  },
+  {
+    "id": "M42",
+    "name": "Orion Nebula",
+    "ra_hours": 5.588006666666668,
+    "dec_degrees": -5.3876
+  },
+  {
+    "id": "M43",
+    "name": "De Mairan's Nebula",
+    "ra_hours": 5.591946666666668,
+    "dec_degrees": -5.27
+  },
+  {
+    "id": "M44",
+    "name": "Beehive Cluster",
+    "ra_hours": 8.666222000000001,
+    "dec_degrees": 19.60917
+  },
+  {
+    "id": "M45",
+    "name": "Pleiades",
+    "ra_hours": 3.7772220000000005,
+    "dec_degrees": 24.17806
+  },
+  {
+    "id": "M46",
+    "name": "Messier 46",
+    "ra_hours": 7.695944666666668,
+    "dec_degrees": -14.845
+  },
+  {
+    "id": "M47",
+    "name": "Messier 47",
+    "ra_hours": 7.609944666666668,
+    "dec_degrees": -14.50417
+  },
+  {
+    "id": "M48",
+    "name": "Messier 48",
+    "ra_hours": 8.226111333333336,
+    "dec_degrees": -5.71972
+  },
+  {
+    "id": "M49",
+    "name": "Messier 49",
+    "ra_hours": 12.496326666666668,
+    "dec_degrees": 8.0004
+  },
+  {
+    "id": "M50",
+    "name": "Heart-Shaped Cluster",
+    "ra_hours": 7.046472000000001,
+    "dec_degrees": -8.36861
+  },
+  {
+    "id": "M51",
+    "name": "Whirlpool Galaxy",
+    "ra_hours": 13.497971666666668,
+    "dec_degrees": 47.1952583
+  },
+  {
+    "id": "M52",
+    "name": "Scorpion Cluster",
+    "ra_hours": 23.413111333333337,
+    "dec_degrees": 61.59222
+  },
+  {
+    "id": "M53",
+    "name": "Messier 53",
+    "ra_hours": 13.215347200000004,
+    "dec_degrees": 18.168167
+  },
+  {
+    "id": "M54",
+    "name": "Messier 54",
+    "ra_hours": 18.91759166666667,
+    "dec_degrees": -30.479861
+  },
+  {
+    "id": "M55",
+    "name": "Specter Cluster",
+    "ra_hours": 19.666586133333336,
+    "dec_degrees": -30.96475
+  },
+  {
+    "id": "M56",
+    "name": "Messier 56",
+    "ra_hours": 19.276547200000003,
+    "dec_degrees": 30.183472
+  },
+  {
+    "id": "M57",
+    "name": "Ring Nebula",
+    "ra_hours": 18.893082434975337,
+    "dec_degrees": 33.02913424654
+  },
+  {
+    "id": "M58",
+    "name": "Messier 58",
+    "ra_hours": 12.628777075000002,
+    "dec_degrees": 11.81809
+  },
+  {
+    "id": "M59",
+    "name": "Messier 59",
+    "ra_hours": 12.700627260421335,
+    "dec_degrees": 11.64691930771
+  },
+  {
+    "id": "M60",
+    "name": "Messier 60",
+    "ra_hours": 12.727769673664838,
+    "dec_degrees": 11.55269115946306
+  },
+  {
+    "id": "M61",
+    "name": "Swirling Galaxy",
+    "ra_hours": 12.365257849524667,
+    "dec_degrees": 4.47377704644
+  },
+  {
+    "id": "M62",
+    "name": "Flickering Globular",
+    "ra_hours": 17.02016666666667,
+    "dec_degrees": -30.112361
+  },
+  {
+    "id": "M63",
+    "name": "Sunflower Galaxy",
+    "ra_hours": 13.263687274831334,
+    "dec_degrees": 42.02936891003
+  },
+  {
+    "id": "M64",
+    "name": "Black Eye Galaxy",
+    "ra_hours": 12.945471113333337,
+    "dec_degrees": 21.6826583
+  },
+  {
+    "id": "M65",
+    "name": "Leo Triplet Member 1",
+    "ra_hours": 11.315530129299335,
+    "dec_degrees": 13.09230575102
+  },
+  {
+    "id": "M66",
+    "name": "Leo Triplet Member 2",
+    "ra_hours": 11.33750666666667,
+    "dec_degrees": 12.9915
+  },
+  {
+    "id": "M67",
+    "name": "King Cobra Cluster",
+    "ra_hours": 8.856528,
+    "dec_degrees": 11.815
+  },
+  {
+    "id": "M68",
+    "name": "Messier 68",
+    "ra_hours": 12.657772200000002,
+    "dec_degrees": -26.744056
+  },
+  {
+    "id": "M69",
+    "name": "Messier 69",
+    "ra_hours": 18.523083333333336,
+    "dec_degrees": -32.348083
+  },
+  {
+    "id": "M70",
+    "name": "Messier 70",
+    "ra_hours": 18.720211133333336,
+    "dec_degrees": -32.292111
+  },
+  {
+    "id": "M71",
+    "name": "Angelfish Cluster",
+    "ra_hours": 19.896247200000005,
+    "dec_degrees": 18.779194
+  },
+  {
+    "id": "M72",
+    "name": "Messier 72",
+    "ra_hours": 20.891027800000003,
+    "dec_degrees": -12.537306
+  },
+  {
+    "id": "M73",
+    "name": "Messier 73",
+    "ra_hours": 20.983333333333338,
+    "dec_degrees": -12.633
+  },
+  {
+    "id": "M74",
+    "name": "Phantom Galaxy",
+    "ra_hours": 1.6115958676840003,
+    "dec_degrees": 15.78364097564
+  },
+  {
+    "id": "M75",
+    "name": "Messier 75",
+    "ra_hours": 20.101344720000004,
+    "dec_degrees": -21.9222611
+  },
+  {
+    "id": "M76",
+    "name": "Little Dumbbell Nebula",
+    "ra_hours": 1.705459936894667,
+    "dec_degrees": 51.57542638057
+  },
+  {
+    "id": "M77",
+    "name": "Cetus A",
+    "ra_hours": 2.7113081019279996,
+    "dec_degrees": -0.01329435839
+  },
+  {
+    "id": "M78",
+    "name": "Messier 78",
+    "ra_hours": 5.7793886666666685,
+    "dec_degrees": 0.07917
+  },
+  {
+    "id": "M79",
+    "name": "Messier 79",
+    "ra_hours": 5.402941666666667,
+    "dec_degrees": -24.52425
+  },
+  {
+    "id": "M80",
+    "name": "Messier 80",
+    "ra_hours": 16.284002800000003,
+    "dec_degrees": -22.976083
+  },
+  {
+    "id": "M81",
+    "name": "Bode's Galaxy",
+    "ra_hours": 9.925881293236001,
+    "dec_degrees": 69.06529514038
+  },
+  {
+    "id": "M82",
+    "name": "Cigar Galaxy",
+    "ra_hours": 9.931230553333336,
+    "dec_degrees": 69.6797028
+  },
+  {
+    "id": "M83",
+    "name": "Southern Pinwheel Galaxy",
+    "ra_hours": 13.616922000000002,
+    "dec_degrees": -29.865761111
+  },
+  {
+    "id": "M84",
+    "name": "Messier 84",
+    "ra_hours": 12.417706480533337,
+    "dec_degrees": 12.886983139
+  },
+  {
+    "id": "M85",
+    "name": "Messier 85",
+    "ra_hours": 12.423348053333335,
+    "dec_degrees": 18.1910806
+  },
+  {
+    "id": "M86",
+    "name": "Messier 86",
+    "ra_hours": 12.436615000000003,
+    "dec_degrees": 12.9459694
+  },
+  {
+    "id": "M87",
+    "name": "Virgo A",
+    "ra_hours": 12.51372871781667,
+    "dec_degrees": 12.391123246083
+  },
+  {
+    "id": "M88",
+    "name": "Messier 88",
+    "ra_hours": 12.533097918401337,
+    "dec_degrees": 14.42031915884
+  },
+  {
+    "id": "M89",
+    "name": "Messier 89",
+    "ra_hours": 12.594390925952803,
+    "dec_degrees": 12.556341907139
+  },
+  {
+    "id": "M90",
+    "name": "Messier 90",
+    "ra_hours": 12.613833606663334,
+    "dec_degrees": 13.1629232814
+  },
+  {
+    "id": "M91",
+    "name": "Messier 91",
+    "ra_hours": 12.590679076703333,
+    "dec_degrees": 14.49632231493
+  },
+  {
+    "id": "M92",
+    "name": "Messier 92",
+    "ra_hours": 17.285386133333336,
+    "dec_degrees": 43.135944
+  },
+  {
+    "id": "M93",
+    "name": "Starfish Cluster",
+    "ra_hours": 7.742944666666668,
+    "dec_degrees": -23.85611
+  },
+  {
+    "id": "M94",
+    "name": "Cat's Eye Galaxy",
+    "ra_hours": 12.848076054762002,
+    "dec_degrees": 41.12025024573
+  },
+  {
+    "id": "M95",
+    "name": "Messier 95",
+    "ra_hours": 10.732703152383337,
+    "dec_degrees": 11.70369477537
+  },
+  {
+    "id": "M96",
+    "name": "Messier 96",
+    "ra_hours": 10.779373333333334,
+    "dec_degrees": 11.8199389
+  },
+  {
+    "id": "M97",
+    "name": "Owl Nebula",
+    "ra_hours": 11.246586748550003,
+    "dec_degrees": 55.01902300891
+  },
+  {
+    "id": "M98",
+    "name": "Messier 98",
+    "ra_hours": 12.230080852416,
+    "dec_degrees": 14.900542632
+  },
+  {
+    "id": "M99",
+    "name": "Coma Pinwheel",
+    "ra_hours": 12.313784720000001,
+    "dec_degrees": 14.4164889
+  },
+  {
+    "id": "M100",
+    "name": "Mirror Galaxy",
+    "ra_hours": 12.381924999822001,
+    "dec_degrees": 15.8223045161
+  },
+  {
+    "id": "M101",
+    "name": "Pinwheel Galaxy",
+    "ra_hours": 14.053495280000003,
+    "dec_degrees": 54.34875
+  },
+  {
+    "id": "M102",
+    "name": "Spindle Galaxy",
+    "ra_hours": 15.10821138666667,
+    "dec_degrees": 55.7633083
+  },
+  {
+    "id": "M103",
+    "name": "Messier 103",
+    "ra_hours": 1.5558613333333338,
+    "dec_degrees": 60.65361
+  },
+  {
+    "id": "M104",
+    "name": "Sombrero Galaxy",
+    "ra_hours": 12.666508849727803,
+    "dec_degrees": -11.623054494444
+  },
+  {
+    "id": "M105",
+    "name": "Messier 105",
+    "ra_hours": 10.797111113333335,
+    "dec_degrees": 12.5816306
+  },
+  {
+    "id": "M106",
+    "name": "Messier 106",
+    "ra_hours": 12.316005553333337,
+    "dec_degrees": 47.3037194
+  },
+  {
+    "id": "M107",
+    "name": "Messier 107",
+    "ra_hours": 16.542183333333337,
+    "dec_degrees": -13.053778
+  },
+  {
+    "id": "M108",
+    "name": "Surfboard Galaxy",
+    "ra_hours": 11.191935280000001,
+    "dec_degrees": 55.6741222
+  },
+  {
+    "id": "M109",
+    "name": "Vacuum Cleaner Galaxy",
+    "ra_hours": 11.959989763323335,
+    "dec_degrees": 53.37472391176001
+  },
+  {
+    "id": "M110",
+    "name": "Edward Young Star",
+    "ra_hours": 0.6727936763886667,
+    "dec_degrees": 41.68541867226
+  }
+]
