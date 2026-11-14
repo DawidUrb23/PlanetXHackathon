@@ -1,327 +1,371 @@
-import os
+"""NASA Space Apps: katalog wspolny dla aplikacji mobilnej.
+W api.py: from catalog_api import router as catalog_router
+           app.include_router(catalog_router)  # jeden raz
+"""
+import re
 from datetime import datetime, timezone
-from typing import Optional
-import psycopg
-from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Query
-from fastapi.middleware.cors import CORSMiddleware
-import uvicorn
+from fastapi import APIRouter, HTTPException, Query
+from psycopg.rows import dict_row
+from nasa_asteroid_service import db_connection, get_asteroids
 
-# Import Twoich lokalnych serwisów
-from nasa_asteroid_service import get_asteroids
-from ETL_bridge import ingest as ingest_spherex
-from spherex_service import get_spherex_observations
-
-load_dotenv()
-
-app = FastAPI(title="NASA Space Apps Backend")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+router = APIRouter(prefix='/api/catalog', tags=['Catalog & NASA'])
+NASA_URL='https://ssd-api.jpl.nasa.gov/sb_ident.api'
 
 
-def get_pg_conn():
-    return psycopg.connect(
-        host=os.getenv("DB_HOST", os.getenv("POSTGRES_HOST", "localhost")),
-        port=os.getenv("DB_PORT", "5432"),
-        dbname=os.getenv("DB_NAME", os.getenv("POSTGRES_NAME", "nasa_spaceapps")),
-        user=os.getenv("DB_USER", os.getenv("POSTGRES_USER", "postgres")),
-        password=os.getenv("DB_PASSWORD", os.getenv("POSTGRES_PASS")),
-    )
+def like_pattern(text):
+    text=text.replace('\\','\\\\').replace('%','\\%').replace('_','\\_')
+    return '%'+text+'%'
 
 
-def like_pattern(term: str) -> str:
-    escaped = term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-    return f"%{escaped}%"
+def ra_to_nasa(value):
+    sec=round(value/15*3600,2) % 86400
+    h,rem=divmod(sec,3600)
+    m,s=divmod(rem,60)
+    return f'{int(h):02d}-{int(m):02d}-{s:05.2f}'
 
 
-def deg_to_hms_str(ra_deg: float) -> str:
-    total_hours = (ra_deg % 360.0) / 15.0
-    h = int(total_hours)
-    rem_m = (total_hours - h) * 60.0
-    m = int(rem_m)
-    s = int((rem_m - m) * 60.0)
-    return f"{h:02d}-{m:02d}-{s:02d}"
+def dec_to_nasa(value):
+    sec=round(abs(value)*3600,2)
+    d,rem=divmod(sec,3600)
+    m,s=divmod(rem,60)
+    return f'{"M" if value < 0 else ""}{int(d):02d}-{int(m):02d}-{s:05.2f}'
 
 
-def deg_to_dms_str(dec_deg: float) -> str:
-    sign = "-" if dec_deg < 0 else ""
-    abs_deg = abs(dec_deg)
-    d = int(abs_deg)
-    rem_m = (abs_deg - d) * 60.0
-    m = int(rem_m)
-    s = int((rem_m - m) * 60.0)
-    return f"{sign}{d:02d}-{m:02d}-{s:02d}"
+def ra_to_deg(value):
+    if isinstance(value,(float,int)): return float(value)
+    n=re.findall(r'\d+(?:\.\d+)?',str(value))
+    if len(n)!=3: raise ValueError(f'Nieznany format RA: {value!r}')
+    h,m,s=map(float,n)
+    return (h+m/60+s/3600)*15
 
 
-def hms_to_deg(hms: str) -> float:
-    parts = hms.replace(":", " ").split()
-    h, m, s = float(parts[0]), float(parts[1]), float(parts[2])
-    return (h + m / 60.0 + s / 3600.0) * 15.0
+def dec_to_deg(value):
+    if isinstance(value,(float,int)): return float(value)
+    txt=str(value).strip()
+    n=re.findall(r'\d+(?:\.\d+)?',txt)
+    if len(n)!=3: raise ValueError(f'Nieznany format Dec: {value!r}')
+    d,m,s=map(float,n)
+    return (-1 if txt.startswith(('-', 'M','m')) else 1)*(d+m/60+s/3600)
 
 
-def dms_to_deg(dms: str) -> float:
-    cleaned = dms.replace("'", " ").replace('"', " ").replace(":", " ").strip()
-    sign = -1.0 if cleaned.startswith("-") else 1.0
-    parts = cleaned.lstrip("+-").split()
-    d, m, s = float(parts[0]), float(parts[1]), float(parts[2])
-    return sign * (d + m / 60.0 + s / 3600.0)
+def _list_db(name=None,ra=None,dec=None,radius=15,limit=50):
+    if (ra is None)!=(dec is None):
+        raise HTTPException(status_code=422,detail='Podaj oba parametry ra i dec')
+    where=[]; params=[]
+    for term in (name or '').split():
+        pat=like_pattern(term)
+        where.append('''(o.name ILIKE %s OR o.nasa_identifier ILIKE %s
+                   OR o.description ILIKE %s OR o.object_type ILIKE %s
+                   OR EXISTS (SELECT 1 FROM images z WHERE z.object_id=o.id AND z.title ILIKE %s))''')
+        params.extend([pat]*5)
+    if ra is not None:
+        where.append('''obs.ra IS NOT NULL AND obs.dec IS NOT NULL AND
+            degrees(acos(least(1,greatest(-1,
+            sin(radians(obs.dec))*sin(radians(%s))+
+            cos(radians(obs.dec))*cos(radians(%s))*cos(radians(obs.ra-%s)) ))))<=%s''')
+        params.extend([dec,dec,ra,radius])
+    sql='''SELECT o.id,o.name,o.nasa_identifier AS designation,o.object_type,o.description,
+            obs.ra,obs.dec,obs.observed_at,COALESCE(imgs.images,'[]'::json) AS images
+            FROM celestial_objects o
+            LEFT JOIN LATERAL (
+                SELECT ra,dec,observed_at FROM observations
+                WHERE object_id=o.id AND ra IS NOT NULL AND dec IS NOT NULL
+                ORDER BY observed_at DESC NULLS LAST,id DESC LIMIT 1
+            ) obs ON TRUE
+            LEFT JOIN LATERAL (
+                SELECT json_agg(json_build_object('title',title,'url',image_url) ORDER BY id) AS images
+                FROM (SELECT id,title,image_url FROM images WHERE object_id=o.id ORDER BY id LIMIT 10) i
+            ) imgs ON TRUE'''
+    if where: sql+=' WHERE '+' AND '.join(where)
+    sql+=' ORDER BY o.id DESC LIMIT %s'
+    params.append(limit)
+    with db_connection() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(sql,params)
+            rows=cur.fetchall()
+    return [{
+        'id':str(r['id']), 'name':r['name'] or r['designation'] or f"Obiekt {r['id']}",
+        'designation':r['designation'] or '', 'object_type':r['object_type'] or 'celestial_object',
+        'description':r['description'] or 'Brak opisu w bazie',
+        'ra':r['ra'], 'dec':r['dec'],
+        'observed_at':r['observed_at'].isoformat() if r['observed_at'] else None,
+        'magnitude':None, 'images':r['images'] or [],
+        'data_source':'celestial_objects', 'position_current':False,
+    } for r in rows]
 
 
-def query_catalog_db(
-    cur,
-    name: Optional[str] = None,
-    ra: Optional[float] = None,
-    dec: Optional[float] = None,
-    radius: float = 15.0,
-    limit: int = 100,
-):
-    inner_params = []
-    cone = ra is not None and dec is not None
-
-    if cone:
-        sep_sql = (
-            "degrees(acos(least(1, greatest(-1, "
-            "sin(radians(obs.dec)) * sin(radians(%s)) + "
-            "cos(radians(obs.dec)) * cos(radians(%s)) * cos(radians(obs.ra - %s)))))) AS sep_deg"
-        )
-        inner_params += [dec, dec, ra]
-    else:
-        sep_sql = "NULL::double precision AS sep_deg"
-
-    inner = f"""
-        WITH obs AS (
-            SELECT object_id, MIN(ra) AS ra, MIN(dec) AS dec
-            FROM observations
-            GROUP BY object_id
-        )
-        SELECT o.id, o.name, o.nasa_identifier AS designation, o.object_type, o.description,
-               obs.ra, obs.dec,
-               {sep_sql}
-        FROM celestial_objects o
-        LEFT JOIN obs ON obs.object_id = o.id
-    """
-
-    where, params = [], []
-
-    if name and name.strip():
-        for term in name.strip().split():
-            where.append(
-                "(t.name ILIKE %s OR t.designation ILIKE %s "
-                "OR t.description ILIKE %s OR t.object_type ILIKE %s)"
-            )
-            params += [like_pattern(term)] * 4
-
-    if cone:
-        where.append("t.sep_deg IS NOT NULL AND t.sep_deg <= %s")
-        params.append(radius)
-
-    order = "t.sep_deg ASC NULLS LAST, t.id ASC" if cone else "t.id ASC"
-
-    sql = (
-        "SELECT t.* FROM (" + inner + ") t "
-        + (f"WHERE {' AND '.join(where)} " if where else "")
-        + f"ORDER BY {order} LIMIT %s"
-    )
-
-    cur.execute(sql, inner_params + params + [limit])
-    rows = cur.fetchall()
-
-    results = []
-    for r in rows:
-        obj_id, obj_name, desig, otype, desc, ora, odec, sep = r
-        cur.execute("SELECT title, image_url FROM images WHERE object_id = %s ORDER BY title", (obj_id,))
-        imgs = [{"title": im[0], "url": im[1]} for im in cur.fetchall()]
-
-        results.append({
-            "id": str(obj_id),
-            "name": obj_name or desig or f"Obiekt {obj_id}",
-            "designation": desig or "",
-            "object_type": otype or "celestial_object",
-            "description": desc or "Brak opisu w bazie.",
-            "ra": float(ora) if ora is not None else 0.0,
-            "dec": float(odec) if odec is not None else 0.0,
-            "sep_deg": round(float(sep), 4) if sep is not None else None,
-            "magnitude": 15.0,
-            "images": imgs,
-        })
-    return results
-
-
-# --------------------------------------------------------------------------
-# 1. Endpointy katalogu PostgreSQL (/api/catalog/...)
-# --------------------------------------------------------------------------
-@app.get("/api/catalog/objects")
-def get_catalog_objects(
-    name: Optional[str] = Query(None),
-    ra: Optional[float] = Query(None),
-    dec: Optional[float] = Query(None),
-    radius: float = Query(15.0),
-    limit: int = Query(100, ge=1, le=500),
-):
-    with get_pg_conn() as conn:
-        with conn.cursor() as cur:
-            items = query_catalog_db(cur, name=name, ra=ra, dec=dec, radius=radius, limit=limit)
-    return {"count": len(items), "asteroids": items}
-
-
-@app.get("/api/catalog/objects/details")
-def get_catalog_object_details(name: str = Query(...)):
-    with get_pg_conn() as conn:
-        with conn.cursor() as cur:
-            items = query_catalog_db(cur, name=name, limit=1)
-            if not items:
-                raise HTTPException(status_code=404, detail="Nie znaleziono obiektu w bazie")
-            return items[0]
-
-
-@app.get("/api/catalog/scan-or-fetch")
-def scan_or_fetch_sky(
-    ra: float = Query(...),
-    dec: float = Query(...),
-    radius: float = Query(12.0),
-    lat: float = Query(50.3),
-    lon: float = Query(18.8),
-    alt_km: float = Query(0.3),
-    fetch_spherex: bool = Query(False),
-):
-    """
-    1. Sprawdza lokalny katalog PostgreSQL.
-    2. Jeśli brak obiektów w tym regionie nieba, pobiera je z NASA JPL (sb_ident.api)
-       i zapisuje do tabel celestial_objects oraz observations w PostgreSQL.
-    """
-    with get_pg_conn() as conn:
-        with conn.cursor() as cur:
-            local_hits = query_catalog_db(cur, ra=ra, dec=dec, radius=radius, limit=50)
-            if len(local_hits) > 0:
-                return {
-                    "source": "local_db",
-                    "count": len(local_hits),
-                    "asteroids": local_hits,
-                }
-
-    # Brak w lokalnej bazie -> pobieramy z NASA JPL
-    ra_hms = deg_to_hms_str(ra)
-    dec_dms = deg_to_dms_str(dec)
-    half_w = min(max(radius, 1.0), 5.0)
-
+@router.get('/objects')
+def get_catalog_objects(name: str|None=Query(None,max_length=100),
+    ra:float|None=Query(None,ge=0,lt=360),dec:float|None=Query(None,ge=-90,le=90),
+    radius:float=Query(15,gt=0,le=180),limit:int=Query(50,ge=1,le=200)):
     try:
-        nasa_resp = get_asteroids(
-            latitude=lat,
-            longitude=lon,
-            altitude_km=alt_km,
-            observation_time=datetime.now(timezone.utc),
-            ra_center=ra_hms,
-            dec_center=dec_dms,
-            ra_half_width=half_w,
-            dec_half_width=half_w,
-            magnitude_limit=21.0,
-        )
-        nasa_objects = nasa_resp.get("data", {}).get("objects", [])
-    except Exception as e:
-        print("Błąd zapytania do NASA JPL:", e)
-        return {"source": "nasa_error", "count": 0, "asteroids": []}
-
-    with get_pg_conn() as conn:
-        with conn.cursor() as cur:
-            nasa_url = "https://ssd-api.jpl.nasa.gov/sb_ident.api"
-            cur.execute("SELECT id FROM data_sources WHERE source_url = %s LIMIT 1", (nasa_url,))
-            src_row = cur.fetchone()
-            if src_row:
-                source_id = src_row[0]
-            else:
-                cur.execute(
-                    "INSERT INTO data_sources (name, provider, source_url) VALUES (%s, %s, %s) RETURNING id",
-                    ("NASA JPL Small-Body Identification", "NASA JPL", nasa_url),
-                )
-                source_id = cur.fetchone()[0]
-
-            now_utc = datetime.now(timezone.utc)
-
-            for item in nasa_objects:
-                obj_name = item["name"].strip()
-                obj_ra = hms_to_deg(item["ra"])
-                obj_dec = dms_to_deg(item["dec"])
-                mag = item.get("magnitude")
-                desc = f"Asteroida pobrana z NASA JPL (Vmag={mag}) w sektorze RA={obj_ra:.3f}°, Dec={obj_dec:.3f}°."
-
-                cur.execute("SELECT id FROM celestial_objects WHERE name = %s LIMIT 1", (obj_name,))
-                existing = cur.fetchone()
-                if existing:
-                    obj_id = existing[0]
-                else:
-                    cur.execute(
-                        """
-                        INSERT INTO celestial_objects (name, object_type, nasa_identifier, description)
-                        VALUES (%s, %s, %s, %s)
-                        RETURNING id
-                        """,
-                        (obj_name, "asteroid", obj_name, desc),
-                    )
-                    obj_id = cur.fetchone()[0]
-
-                cur.execute("SELECT id FROM observations WHERE object_id = %s AND source_id = %s LIMIT 1", (obj_id, source_id))
-                obs_row = cur.fetchone()
-                if obs_row:
-                    cur.execute(
-                        "UPDATE observations SET ra = %s, dec = %s, observed_at = %s WHERE id = %s",
-                        (obj_ra, obj_dec, now_utc, obs_row[0]),
-                    )
-                else:
-                    cur.execute(
-                        """
-                        INSERT INTO observations (object_id, source_id, observed_at, ra, dec, wavelength_band, data_url)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s)
-                        """,
-                        (obj_id, source_id, now_utc, obj_ra, obj_dec, "Optical-V", nasa_url),
-                    )
-
-            conn.commit()
-
-            if fetch_spherex:
-                try:
-                    ingest_spherex(ra=ra, dec=dec, limit=10)
-                except Exception as e:
-                    print("SPHEREx pominięty:", e)
-
-            updated_hits = query_catalog_db(cur, ra=ra, dec=dec, radius=radius, limit=50)
-
-    return {
-        "source": "nasa_fetched_and_saved",
-        "count": len(updated_hits),
-        "asteroids": updated_hits,
-    }
+        rows=_list_db(name,ra,dec,radius,limit)
+        return {'source':'local_db','count':len(rows),'asteroids':rows}
+    except HTTPException: raise
+    except Exception as exc:
+        print('CATALOG OBJECTS ERROR',repr(exc))
+        raise HTTPException(status_code=500,detail='Blad odczytu katalogu')
 
 
-# --------------------------------------------------------------------------
-# 2. Dotychczasowe endpointy NASA (/api/asteroids, /api/spherex)
-# --------------------------------------------------------------------------
-@app.get("/api/asteroids")
-def nasa_live_asteroids(
-    lat: float = Query(50.3),
-    lon: float = Query(18.8),
-    alt_km: float = Query(0.3),
-    ra_center: str = Query("03-00-00"),
-    dec_center: str = Query("20-00-00"),
+@router.get('/objects/details')
+def get_catalog_object_details(name:str=Query(...,min_length=1,max_length=100)):
+    try:
+        rows=_list_db(name=name,limit=20)
+        if not rows: raise HTTPException(status_code=404,detail='Brak obiektu w bazie')
+        exact=next((o for o in rows if o['name'].casefold()==name.casefold() or o['designation'].casefold()==name.casefold()),None)
+        return exact or rows[0]
+    except HTTPException: raise
+    except Exception as exc:
+        print('CATALOG DETAILS ERROR',repr(exc))
+        raise HTTPException(status_code=500,detail='Blad odczytu szczegolow')
+
+def _cache_objects(cur, max_items=100):
+    """Tylko rozpoznawalne asteroidowe rekordy z cache JSONB.
+    Nie traktujemy wycinkow SPHEREx jako asteroid ani fotografii FITS jako JPG.
+    """
+    cur.execute("""
+        SELECT response_data, fetched_at
+        FROM asteroid_cache
+        WHERE expires_at > NOW()
+        ORDER BY fetched_at DESC
+        LIMIT 30
+    """)
+    found = {}
+    for record in cur.fetchall():
+        raw = record['response_data'] or {}
+        if not isinstance(raw, dict):
+            continue
+        data = raw.get('data', raw)
+        if not isinstance(data, dict):
+            continue
+        for item in data.get('objects', []):
+            if not isinstance(item, dict) or not item.get('name'):
+                continue
+            try:
+                ra = ra_to_deg(item['ra'])
+                dec = dec_to_deg(item['dec'])
+            except (KeyError, ValueError, TypeError, IndexError):
+                continue
+            name = str(item['name']).strip()
+            key = name.casefold()
+            if key in found:
+                continue
+            try:
+                magnitude = float(item['magnitude']) if item.get('magnitude') is not None else None
+            except (ValueError, TypeError):
+                magnitude = None
+            found[key] = {
+                'id': f'cache:{key}', 'name': name, 'designation': name,
+                'object_type': 'asteroid', 'description': 'Asteroida NASA JPL (cache)',
+                'ra': ra, 'dec': dec, 'observed_at': record['fetched_at'].isoformat() if record['fetched_at'] else None,
+                'magnitude': magnitude, 'images': [], 'data_source': 'asteroid_cache',
+                'position_current': False,
+            }
+            if len(found) >= max_items:
+                return list(found.values())
+    return list(found.values())
+
+
+def _detail_images(cur, names):
+    """Uzupelnij fotografie z cache szczegolow bez udawania pozycji orbitalnej."""
+    # Ograniczamy rekordy i rozmiar odpowiedzi; JSON nie zawiera plikow graficznych.
+    cur.execute("""SELECT lookup_key,response_data FROM asteroid_details_cache
+                   ORDER BY fetched_at DESC LIMIT 100""")
+    by_name = {str(n).casefold(): n for n in names}
+    result = {}
+    for row in cur.fetchall():
+        data = row['response_data']
+        if not isinstance(data, dict):
+            continue
+        labels = [str(row['lookup_key']), str(data.get('name') or ''), str(data.get('designation') or '')]
+        keys = [x.casefold() for x in labels if x]
+        images = []
+        for image in data.get('images', [])[:10]:
+            if isinstance(image, dict) and isinstance(image.get('url'), str):
+                images.append({'title':image.get('title') or 'NASA', 'url':image['url']})
+        for key in keys:
+            if key in by_name and images:
+                result[key] = images
+    return result
+
+
+def _featured_rows(cur):
+    """Opcjonalny osobny katalog 100 znanych celow; planety nie maja stalych RA/Dec."""
+    cur.execute("SELECT to_regclass('public.featured_sky_objects')")
+    if next(iter(cur.fetchone().values())) is None:
+        return []
+    cur.execute("""SELECT object_key,name,designation,object_type,is_moving,
+                        ra_deg,dec_deg,image_url,image_source_url
+                   FROM featured_sky_objects ORDER BY object_key""")
+    result=[]
+    for obj in cur.fetchall():
+        images = [{'title': obj['name'], 'url': obj['image_url']}] if obj['image_url'] else []
+        result.append({
+            'id':f"featured:{obj['object_key']}", 'name':obj['name'],
+            'designation':obj['designation'], 'object_type':obj['object_type'],
+            'description':'Wyróżniony obiekt astronomiczny',
+            'ra': None if obj['is_moving'] else obj['ra_deg'],
+            'dec':None if obj['is_moving'] else obj['dec_deg'],
+            'observed_at':None, 'magnitude':None, 'images':images,
+            'data_source':'featured_sky_objects',
+            'position_current':False, 'image_source_url':obj['image_source_url'],
+        })
+    return result
+
+
+@router.get('/all')
+def get_all_catalog_objects(
+    limit: int = Query(500, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+    include_cache: bool = Query(True),
+    include_featured: bool = Query(True),
 ):
-    return get_asteroids(
-        latitude=lat,
-        longitude=lon,
-        altitude_km=alt_km,
-        observation_time=datetime.now(timezone.utc),
-        ra_center=ra_center,
-        dec_center=dec_center,
-    )
+    """Jeden JSON z katalogu, cache i katalogu 100 obiektow.
+    Odpowiedz jest stronicowana, a nie obcina po cichu do 20.
+    """
+    try:
+        # Odczyt z bazy jest limitowany osobno od zapytania NASA.
+        with db_connection() as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute("""SELECT o.id,o.name,o.nasa_identifier AS designation,
+                       o.object_type,o.description,obs.ra,obs.dec,obs.observed_at,
+                       COALESCE(imgs.images,'[]'::json) AS images
+                    FROM celestial_objects o
+                    LEFT JOIN LATERAL (
+                        SELECT ra,dec,observed_at FROM observations
+                        WHERE object_id=o.id AND ra IS NOT NULL AND dec IS NOT NULL
+                        ORDER BY observed_at DESC NULLS LAST,id DESC LIMIT 1
+                    ) obs ON TRUE
+                    LEFT JOIN LATERAL (
+                        SELECT json_agg(json_build_object('title',title,'url',image_url) ORDER BY id) images
+                        FROM (SELECT id,title,image_url FROM images WHERE object_id=o.id
+                              ORDER BY id LIMIT 10) q
+                    ) imgs ON TRUE
+                    ORDER BY o.id""")
+                rows = cur.fetchall()
+                objects = []
+                for r in rows:
+                    objects.append({
+                        'id':str(r['id']), 'name':r['name'] or r['designation'] or f"Obiekt {r['id']}",
+                        'designation':r['designation'] or '',
+                        'object_type':r['object_type'] or 'celestial_object',
+                        'description':r['description'] or 'Brak opisu',
+                        'ra':r['ra'], 'dec':r['dec'],
+                        'observed_at':r['observed_at'].isoformat() if r['observed_at'] else None,
+                        'magnitude':None, 'images':r['images'] or [],
+                        'data_source':'celestial_objects', 'position_current':False,
+                    })
+                if include_cache:
+                    cache = _cache_objects(cur, max_items=200)
+                    existing = {o['name'].casefold() for o in objects}
+                    objects.extend(x for x in cache if x['name'].casefold() not in existing)
+                    more_images = _detail_images(cur, [o['name'] for o in objects])
+                    for obj in objects:
+                        if not obj['images']:
+                            obj['images'] = more_images.get(obj['name'].casefold(), [])
+                if include_featured:
+                    featured = _featured_rows(cur)
+                    # Wyróżnione obiekty pozostają osobnymi kartami (mogą mieć tę samą nazwę).
+                    objects.extend(featured)
+                spectral=[]
+                # SPHEREx zawiera obserwacje obszarow, nie fotografie obiektow.
+                if include_cache:
+                    cur.execute("SELECT to_regclass('public.spherex_cache')")
+                    if next(iter(cur.fetchone().values())) is not None:
+                        cur.execute("""SELECT response_data,fetched_at FROM spherex_cache
+                                        ORDER BY fetched_at DESC LIMIT 30""")
+                        for rec in cur.fetchall():
+                            raw=rec['response_data'] or {}
+                            d=raw.get('data',raw) if isinstance(raw,dict) else {}
+                            if not isinstance(d,dict): continue
+                            target=d.get('target') or {}
+                            spectral.append({'target':target,
+                                'observation_count':len(d.get('observations') or []),
+                                'fetched_at':rec['fetched_at'].isoformat() if rec['fetched_at'] else None})
+        result = objects[offset:offset+limit]
+        return {
+            'source':'postgresql_combined', 'count':len(result),
+            'total':len(objects), 'offset':offset, 'limit':limit,
+            'has_more': offset+limit < len(objects),
+            'asteroids':result, 'spherex_observation_groups':spectral,
+            'note':'Pole asteroids zawiera rozne typy obiektow, nie tylko asteroidy; pozycje z bazy moga byc historyczne.'
+        }
+    except Exception as exc:
+        print('COMBINED CATALOG ERROR:', repr(exc))
+        raise HTTPException(status_code=500, detail='Blad odczytu katalogu')
 
 
-@app.get("/api/spherex")
-def nasa_spherex(ra: float = Query(...), dec: float = Query(...), limit: int = Query(20)):
-    return get_spherex_observations(ra=ra, dec=dec, limit=limit)
+
+def save_nasa_objects(objects, observation_time):
+    ids={}
+    with db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute('SELECT id FROM data_sources WHERE source_url=%s LIMIT 1',(NASA_URL,))
+            row=cur.fetchone()
+            if row: source_id=row[0]
+            else:
+                cur.execute('INSERT INTO data_sources (name,provider,source_url) VALUES (%s,%s,%s) RETURNING id',('NASA JPL Small-Body Identification','NASA JPL',NASA_URL))
+                source_id=cur.fetchone()[0]
+            for obj in objects:
+                name=str(obj['name']).strip()
+                ra,dec=ra_to_deg(obj['ra']),dec_to_deg(obj['dec'])
+                cur.execute("SELECT id FROM celestial_objects WHERE name=%s AND object_type='asteroid' LIMIT 1",(name,))
+                row=cur.fetchone()
+                if row: obj_id=row[0]
+                else:
+                    cur.execute("INSERT INTO celestial_objects (name,object_type,nasa_identifier,description) VALUES (%s,'asteroid',%s,%s) RETURNING id",(name,name,'Asteroida NASA JPL'))
+                    obj_id=cur.fetchone()[0]
+                cur.execute('SELECT id FROM observations WHERE object_id=%s AND source_id=%s AND observed_at=%s LIMIT 1',(obj_id,source_id,observation_time))
+                if not cur.fetchone():
+                    cur.execute('INSERT INTO observations (object_id,source_id,observed_at,ra,dec,wavelength_band,data_url) VALUES (%s,%s,%s,%s,%s,%s,%s)',(obj_id,source_id,observation_time,ra,dec,'Optical-V',NASA_URL))
+                ids[name]=obj_id
+        conn.commit()
+    return ids
 
 
-if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+@router.get('/scan-or-fetch')
+def scan_or_fetch_sky(
+    ra:float=Query(...,ge=0,lt=360),dec:float=Query(...,ge=-90,le=90),
+    radius:float=Query(15,gt=0,le=30),lat:float=Query(50.3,ge=-90,le=90),
+    lon:float=Query(18.8,ge=-180,le=180),alt_km:float=Query(0.3),
+    limit:int=Query(20,ge=1,le=20),always_fetch_nasa:bool=Query(False),
+    fetch_spherex:bool=Query(False),
+):
+    # 'always_fetch_nasa' zaakceptowane dla zgodnosci; nie pomijamy cache.
+    # Kazdy odczyt JPL zalezy od czasu i miejsca obserwacji.
+    now=datetime.now(timezone.utc)
+    observed=now.replace(minute=(now.minute//5)*5,second=0,microsecond=0)
+    try:
+        response=get_asteroids(
+            latitude=lat,longitude=lon,altitude_km=alt_km,
+            observation_time=observed,ra_center=ra_to_nasa(ra),
+            dec_center=dec_to_nasa(dec),
+            ra_half_width=min(max(radius/2,0.5),2.5),
+            dec_half_width=min(max(radius/2,0.5),2.5),
+            magnitude_limit=17.5,
+        )
+        data=response.get('data',{})
+        selected=sorted(data.get('objects',[]),key=lambda x:float(x.get('distance_from_center_deg') if x.get('distance_from_center_deg') is not None else 1e9))[:limit]
+        ids=save_nasa_objects(selected,observed) if selected else {}
+        items=[{
+            'id':str(ids[str(o['name']).strip()]),'name':str(o['name']).strip(),
+            'designation':str(o['name']).strip(),'object_type':'asteroid',
+            'description':'Asteroida NASA JPL','ra':ra_to_deg(o['ra']),'dec':dec_to_deg(o['dec']),
+            'sep_deg':o.get('distance_from_center_deg'),'magnitude':o.get('magnitude'),
+            'images':[],'observed_at':observed.isoformat(),
+            'data_source':response.get('source','nasa'),'position_current':True,
+        } for o in selected]
+        return {'source':response.get('source','nasa'),'count':len(items),'asteroids':items,
+                'observation_time':observed.isoformat(),
+                'spherex_status':'separate_endpoint' if fetch_spherex else 'not_requested'}
+    except Exception as exc:
+        print('SCAN OR FETCH ERROR',repr(exc))
+        # Wyraznie oznaczamy fallback jako historyczny, a nie aktualne pozycje.
+        try:
+            old=_list_db(ra=ra,dec=dec,radius=radius,limit=limit)
+        except Exception:
+            old=[]
+        if old:
+            return {'source':'local_fallback_stale','count':len(old),'asteroids':old,
+                    'observation_time':observed.isoformat(),'stale':True}
+        raise HTTPException(status_code=503,detail='NASA JPL niedostepna; brak danych w lokalnym katalogu')
