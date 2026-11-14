@@ -588,13 +588,35 @@ private fun parseCatalogObjectsResponse(responseJson: String): List<Star> {
             for (i in 0 until jsonArray.length()) {
                 val obj = jsonArray.getJSONObject(i)
                 val name = obj.optString("name", obj.optString("designation", "Obiekt $i"))
-                val mag = obj.optDouble("magnitude", 15.0).toFloat()
+
                 val desc = obj.optString("description", "Brak opisu w bazie.")
                 val objType = obj.optString("object_type", "celestial_object")
-                val raVal = obj.optDouble("ra", 0.0)
-                val decVal = obj.optDouble("dec", 0.0)
-                val sepVal = if (obj.has("sep_deg") && !obj.isNull("sep_deg")) obj.optDouble("sep_deg") else null
 
+                val sepVal = if (obj.has("sep_deg") && !obj.isNull("sep_deg")) obj.optDouble("sep_deg") else null
+                val mag = if (
+                    obj.has("magnitude") &&
+                    !obj.isNull("magnitude")
+                ) {
+                    obj.optDouble("magnitude").toFloat()
+                } else {
+                    15.0f // Wartość tylko do renderowania, nie rzeczywista jasność
+                }
+
+                if (
+                    !obj.has("ra") ||
+                    obj.isNull("ra") ||
+                    !obj.has("dec") ||
+                    obj.isNull("dec")
+                ) {
+                    Log.w(
+                        "API_PARSE",
+                        "Brak pozycji obiektu: $name"
+                    )
+                    continue
+                }
+
+                val raVal = obj.getDouble("ra")
+                val decVal = obj.getDouble("dec")
                 val imgsArray = obj.optJSONArray("images")
                 val imgUrls = mutableListOf<String>()
                 if (imgsArray != null) {
@@ -646,15 +668,33 @@ fun fetchAllSavedCatalogObjects(
             val urlStr = "$API_URL/api/catalog/all"
             val conn = (URL(urlStr).openConnection() as HttpURLConnection).apply {
                 requestMethod = "GET"
-                connectTimeout = 30000000
-                readTimeout = 30000000
+                connectTimeout = 15000
+                readTimeout = 15000
                 setRequestProperty("Accept", "application/json")
             }
 
-            val jsonStr = if (conn.responseCode in 200..299) {
-                conn.inputStream.bufferedReader().use { it.readText() }
 
-            } else ""
+            val status = conn.responseCode
+
+            val jsonStr = if (status in 200..299) {
+                conn.inputStream.bufferedReader().use {
+                    it.readText()
+                }
+            } else {
+                val errorBody = conn.errorStream
+                    ?.bufferedReader()
+                    ?.use { it.readText() }
+                    ?: "Brak odpowiedzi"
+
+                Log.e(
+                    "API_ALL_SAVED",
+                    "HTTP $status: $errorBody"
+                )
+
+                throw Exception(
+                    "Serwer zwrocil HTTP $status"
+                )
+            }
 
             val allSaved = parseCatalogObjectsResponse(jsonStr)
 
