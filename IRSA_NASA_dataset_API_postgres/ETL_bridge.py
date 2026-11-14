@@ -23,6 +23,8 @@ import psycopg2
 from astroquery.ipac.irsa import Irsa
 from dotenv import load_dotenv
 from psycopg2.extras import execute_values
+from astropy.coordinates import SkyCoord
+from astropy.coordinates.name_resolve import NameResolveError
 
 load_dotenv()
 
@@ -220,8 +222,19 @@ def connect():
 # --------------------------------------------------------------------------
 # Main entry point
 # --------------------------------------------------------------------------
-def ingest(ra: float, dec: float, name: str | None = None, limit: int = 200,
-           bands=None, size: float = DEFAULT_CUTOUT_SIZE, all_versions: bool = False) -> dict:
+def ingest(ra: float | None = None, dec: float | None = None, name: str | None = None,
+           limit: int = 200, bands=None, size: float = DEFAULT_CUTOUT_SIZE,
+           all_versions: bool = False) -> dict:
+    if ra is None or dec is None:
+        if not name:
+            raise ValueError("Provide either --name or both --ra and --dec.")
+        try:
+            coord = SkyCoord.from_name(name)
+            ra, dec = float(coord.ra.deg), float(coord.dec.deg)
+            print(f"Resolved '{name}' -> RA={ra:.6f}, Dec={dec:.6f} deg")
+        except NameResolveError as exc:
+            raise ValueError(f"Could not resolve astronomical object name '{name}'.") from exc
+
     name = name or f"SPHEREx target {ra:.4f}{dec:+.4f}"
 
     df = fetch_spectral_images(ra, dec, limit, bands, all_versions)
@@ -239,7 +252,7 @@ def ingest(ra: float, dec: float, name: str | None = None, limit: int = 200,
             obj_id, created = get_or_create_target(cur, name, ra, dec)
             n_obs = insert_observations(cur, df, obj_id, source_id, ra, dec)
             n_img = insert_images(cur, df, obj_id, source_id, name, ra, dec, size)
-        conn.commit()  # one transaction: all or nothing
+        conn.commit()
     except Exception:
         conn.rollback()
         raise
@@ -253,8 +266,8 @@ def ingest(ra: float, dec: float, name: str | None = None, limit: int = 200,
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser(description="Load SPHEREx spectral images for a position into PostgreSQL.")
-    p.add_argument("--ra", type=float, default=10.684, help="Right ascension [deg]")
-    p.add_argument("--dec", type=float, default=41.269, help="Declination [deg]")
+    p.add_argument("--ra", type=float, default=None, help="Right ascension [deg]") #10.684
+    p.add_argument("--dec", type=float, default=None, help="Declination [deg]") #41.269
     p.add_argument("--name", help="name of the target, e.g. 'M31' (default: built from coordinates)")
     p.add_argument("--limit", type=int, default=200, help="max spectral images to load (default 200)")
     p.add_argument("--bands", type=int, nargs="+", choices=sorted(DETECTORS),
