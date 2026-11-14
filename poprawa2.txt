@@ -1,0 +1,113 @@
+Podmień endpoint /api/catalog/scan-or-fetch w catalog_api.py na poniższy kod:
+Python
+
+@app.get("/api/catalog/scan-or-fetch")
+def scan_or_fetch_sky(
+    ra: float = Query(...),
+    dec: float = Query(...),
+    radius: float = Query(15.0),
+    lat: float = Query(50.3),
+    lon: float = Query(18.8),
+    alt_km: float = Query(0.3),
+    always_fetch_nasa: bool = Query(True),
+    fetch_spherex: bool = Query(False),
+):
+    """
+    Zawsze odpytuje NASA JPL dla wskazanego sektora (chyba że always_fetch_nasa=False),
+    zapisuje wszystkie nowe obiekty do PostgreSQL, a następnie zwraca pełną listę
+    obiektów (zarówno starych z bazy, jak i świeżo pobranych) w promieniu `radius`.
+    """
+    ra_hms = deg_to_hms_str(ra)
+    dec_dms = deg_to_dms_str(dec)
+    half_w = min(max(radius / 2.0, 2.0), 5.0)  # Szersze okno przeszukiwania NASA (do 10x10 deg)
+
+    nasa_objects = []
+    if always_fetch_nasa:
+        try:
+            nasa_resp = get_asteroids(
+                latitude=lat,
+                longitude=lon,
+                altitude_km=alt_km,
+                observation_time=datetime.now(timezone.utc),
+                ra_center=ra_hms,
+                dec_center=dec_dms,
+                ra_half_width=half_w,
+                dec_half_width=half_w,
+                magnitude_limit=20.5,  # Szerszy limit jasności, żeby nie wracało 0 wyników
+            )
+            nasa_objects = nasa_resp.get("data", {}).get("objects", [])
+        except Exception as e:
+            print("Błąd zapytania do NASA JPL:", e)
+
+    with get_pg_conn() as conn:
+        with conn.cursor() as cur:
+            if nasa_objects:
+                nasa_url = "https://ssd-api.jpl.nasa.gov/sb_ident.api"
+                cur.execute("SELECT id FROM data_sources WHERE source_url = %s LIMIT 1", (nasa_url,))
+                src_row = cur.fetchone()
+                if src_row:
+                    source_id = src_row[0]
+                else:
+                    cur.execute(
+                        "INSERT INTO data_sources (name, provider, source_url) VALUES (%s, %s, %s) RETURNING id",
+                        ("NASA JPL Small-Body Identification", "NASA JPL", nasa_url),
+                    )
+                    source_id = cur.fetchone()[0]
+
+                now_utc = datetime.now(timezone.utc)
+
+                for item in nasa_objects:
+                    obj_name = item["name"].strip()
+                    obj_ra = hms_to_deg(item["ra"])
+                    obj_dec = dms_to_deg(item["dec"])
+                    mag = item.get("magnitude")
+                    desc = f"Asteroida z NASA JPL (Vmag={mag}) w sektorze RA={obj_ra:.3f}°, Dec={obj_dec:.3f}°."
+
+                    cur.execute("SELECT id FROM celestial_objects WHERE name = %s LIMIT 1", (obj_name,))
+                    existing = cur.fetchone()
+                    if existing:
+                        obj_id = existing[0]
+                    else:
+                        cur.execute(
+                            """
+                            INSERT INTO celestial_objects (name, object_type, nasa_identifier, description)
+                            VALUES (%s, %s, %s, %s)
+                            RETURNING id
+                            """,
+                            (obj_name, "asteroid", obj_name, desc),
+                        )
+                        obj_id = cur.fetchone()[0]
+
+                    cur.execute("SELECT id FROM observations WHERE object_id = %s AND source_id = %s LIMIT 1", (obj_id, source_id))
+                    obs_row = cur.fetchone()
+                    if obs_row:
+                        cur.execute(
+                            "UPDATE observations SET ra = %s, dec = %s, observed_at = %s WHERE id = %s",
+                            (obj_ra, obj_dec, now_utc, obs_row[0]),
+                        )
+                    else:
+                        cur.execute(
+                            """
+                            INSERT INTO observations (object_id, source_id, observed_at, ra, dec, wavelength_band, data_url)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s)
+                            """,
+                            (obj_id, source_id, now_utc, obj_ra, obj_dec, "Optical-V", nasa_url),
+                        )
+
+                conn.commit()
+
+            if fetch_spherex:
+                try:
+                    ingest_spherex(ra=ra, dec=dec, limit=10)
+                except Exception as e:
+                    print("SPHEREx pominięty:", e)
+
+            # Zwracamy wszystkie obiekty (z bazy + nowo pobrane z NASA) w promieniu `radius`
+            combined_hits = query_catalog_db(cur, ra=ra, dec=dec, radius=radius, limit=150)
+
+    return {
+        "source": "nasa_fetched_and_saved" if nasa_objects else "local_db",
+        "nasa_new_count": len(nasa_objects),
+        "count": len(combined_hits),
+        "asteroids": combined_hits,
+    }
