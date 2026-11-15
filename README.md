@@ -53,6 +53,8 @@ To start the server and expose it publicly so the mobile app can connect to it, 
 
 ## 2. Running the Mobile App (Android)
 
+The app usage, you need to give an access to camera and GPS. You click main button and go inside the app. In the app you can Click "Mapa AR", which allows you to scan the sky which you see with camera. Then app shows you nearest objects to the main target. You can click the object and see the name, you can additionaly download fits image. And see them in your gallery. 
+
 To properly build and run the application, you need to replace the source directory in a newly created Android Studio project:
 
 1. Open **Android Studio** and select **New Project**.
