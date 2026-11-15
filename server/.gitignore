@@ -1,0 +1,32 @@
+
+# Sekrety
+.env
+.env.*
+!.env.example
+
+# Srodowisko Python
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# Pobrane dane NASA
+fits_storage/
+gif_cache/
+*.fits
+*.fit
+*.fts
+
+# Pliki danych i cache
+*.sqlite3
+*.db
+nasa_asteroids_raw.json
+asteroids_filtered.json
+
+# Pliki tymczasowe
+*.log
+*.tmp
+*.part
+
+# VS Code
+.vscode/
