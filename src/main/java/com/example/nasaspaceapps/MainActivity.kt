@@ -3,9 +3,13 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.TextButton
+import coil.compose.AsyncImage
+import coil.request.ImageRequest
+import coil.decode.GifDecoder
 import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.hardware.Sensor
 import android.hardware.SensorEvent
@@ -134,7 +138,7 @@ import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 
-private const val API_URL = "https://journey-convertible-evidence-flame.trycloudflare.com"
+private const val API_URL = "https://combined-acquired-privacy-wrist.trycloudflare.com"
 
 class MainActivity : ComponentActivity() {
     private val requestPermissionLauncher = registerForActivityResult(
@@ -179,7 +183,6 @@ class MainActivity : ComponentActivity() {
                         is Screen.Camera -> {
                             CameraView(
                                 outputDirectory = outputDir,
-                                onPhotoCaptured = { refreshPhotos() },
                                 onStarsReceived = { allSkyStars ->
                                     refreshPhotos()
                                     currentScreen = Screen.StarMap(allSkyStars)
@@ -189,6 +192,18 @@ class MainActivity : ComponentActivity() {
                                     currentScreen = Screen.Gallery
                                 },
                                 photoCount = photos.size
+                            )
+                        }
+                        is Screen.StarMap -> {
+                            StarMapScreen(
+                                stars = screen.stars,
+                                onBack = {
+                                    currentScreen = Screen.Camera
+                                },
+                                onOpenGallery = {
+                                    refreshPhotos()
+                                    currentScreen = Screen.Gallery
+                                }
                             )
                         }
                         is Screen.Gallery -> {
@@ -217,14 +232,7 @@ class MainActivity : ComponentActivity() {
                                     photoItem.imageFile.delete()
                                     photoItem.jsonFile.delete()
                                     refreshPhotos()
-                                }
-                            )
-                        }
-                        is Screen.StarMap -> {
-                            StarMapScreen(
-                                stars = screen.stars,
-                                onBack = {
-                                    currentScreen = Screen.Camera
+                                    currentScreen = Screen.Gallery
                                 }
                             )
                         }
@@ -490,6 +498,211 @@ fun savePhotoMetadata(photoItem: PhotoItem) {
     }
 }
 
+// --------------------------------------------------------------------------
+// Pobieranie strumieniowe plików FITS (bitstream) i konwersja do galerii
+// --------------------------------------------------------------------------
+fun parseFitsDataToBitmap(bytes: ByteArray): Bitmap? {
+    val directBmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+    if (directBmp != null) return directBmp
+
+    try {
+        if (bytes.size < 2880) return null
+
+        var width = 0
+        var height = 0
+        var bitpix = 16
+        var headerBlocks = 0
+        var foundEnd = false
+
+        var offset = 0
+        while (offset + 2880 <= bytes.size) {
+            val blockString = String(bytes, offset, 2880, Charsets.US_ASCII)
+            headerBlocks++
+            offset += 2880
+
+            var currentWidth = 0
+            var currentHeight = 0
+            var currentBitpix = 16
+            var hduHasEnd = false
+
+            for (i in 0 until 2880 step 80) {
+                if (i + 80 <= blockString.length) {
+                    val card = blockString.substring(i, i + 80)
+                    val key = card.take(8).trim().uppercase()
+                    if (key == "END") {
+                        hduHasEnd = true
+                        break
+                    }
+                    val eqIdx = card.indexOf("=")
+                    if (eqIdx != -1) {
+                        val valPart = card.substring(eqIdx + 1).split("/")[0].trim()
+                        when (key) {
+                            "NAXIS1" -> currentWidth = valPart.toIntOrNull() ?: currentWidth
+                            "NAXIS2" -> currentHeight = valPart.toIntOrNull() ?: currentHeight
+                            "BITPIX" -> currentBitpix = valPart.toIntOrNull() ?: currentBitpix
+                        }
+                    }
+                }
+            }
+
+            if (hduHasEnd && currentWidth > 0 && currentHeight > 0) {
+                width = currentWidth
+                height = currentHeight
+                bitpix = currentBitpix
+                foundEnd = true
+                break
+            }
+        }
+
+        if (width <= 0 || height <= 0 || !foundEnd) return null
+
+        val totalPixels = width * height
+        val pixels = FloatArray(totalPixels)
+        val dataOffset = headerBlocks * 2880
+
+        if (dataOffset >= bytes.size) return null
+
+        val buffer = java.nio.ByteBuffer.wrap(bytes, dataOffset, bytes.size - dataOffset)
+        buffer.order(java.nio.ByteOrder.BIG_ENDIAN)
+
+        var minVal = Float.MAX_VALUE
+        var maxVal = -Float.MAX_VALUE
+
+        val bytesPerPixel = kotlin.math.abs(bitpix) / 8
+        for (i in 0 until totalPixels) {
+            if (buffer.remaining() < bytesPerPixel) break
+            val v: Float = when (bitpix) {
+                8 -> (buffer.get().toInt() and 0xFF).toFloat()
+                16 -> buffer.short.toFloat()
+                32 -> buffer.int.toFloat()
+                -32 -> buffer.float
+                -64 -> buffer.double.toFloat()
+                else -> {
+                    if (buffer.remaining() >= 2) buffer.short.toFloat() else 0f
+                }
+            }
+            pixels[i] = v
+            if (v < minVal) minVal = v
+            if (v > maxVal) maxVal = v
+        }
+
+        if (maxVal <= minVal) maxVal = minVal + 1f
+
+        val argbPixels = IntArray(totalPixels)
+        val range = maxVal - minVal
+
+        for (i in 0 until totalPixels) {
+            val norm = ((pixels[i] - minVal) / range).coerceIn(0f, 1f)
+            val stretched = kotlin.math.sqrt(norm.toDouble()).toFloat()
+            val gray = (stretched * 255f).toInt()
+            argbPixels[i] = (0xFF shl 24) or (gray shl 16) or (gray shl 8) or gray
+        }
+
+        return Bitmap.createBitmap(argbPixels, width, height, Bitmap.Config.ARGB_8888)
+    } catch (e: Exception) {
+        Log.e("FitsParser", "Błąd zaawansowanego parsowania FITS", e)
+    }
+    return null
+}
+
+fun downloadFitsFileAndAddToGallery(
+    context: Context,
+    fitsUrlStr: String,
+    outputDir: File,
+    objectName: String,
+    onComplete: (Boolean) -> Unit
+) {
+    android.os.Handler(android.os.Looper.getMainLooper()).post {
+        Toast.makeText(context, "Pobieranie strumienia FITS dla $objectName...", Toast.LENGTH_SHORT).show()
+    }
+
+    CoroutineScope(Dispatchers.IO).launch {
+        try {
+            val url = URL(fitsUrlStr)
+            val conn = (url.openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                connectTimeout = 60000
+                readTimeout = 60000
+                setRequestProperty("Accept", "*/*")
+            }
+
+            if (conn.responseCode in 200..299) {
+                val fitsBytes = conn.inputStream.use { it.readBytes() }
+                Log.d("FitsDownload", "Otrzymano strumień bajtów FITS: ${fitsBytes.size} B")
+
+                val date = Date()
+                val timeStr = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(date)
+                val timestampStr = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(date)
+
+                val fitsFile = File(outputDir, "FITS_$timeStr.fits")
+                fitsFile.writeBytes(fitsBytes)
+
+                val bmp = parseFitsDataToBitmap(fitsBytes)
+                val jpgFile = File(outputDir, "FITS_$timeStr.jpg")
+
+                if (bmp != null) {
+                    jpgFile.outputStream().use { os ->
+                        bmp.compress(Bitmap.CompressFormat.JPEG, 92, os)
+                    }
+                } else {
+                    val emptyBmp = Bitmap.createBitmap(400, 400, Bitmap.Config.ARGB_8888)
+                    val canvas = android.graphics.Canvas(emptyBmp)
+                    canvas.drawColor(android.graphics.Color.BLACK)
+                    val paint = android.graphics.Paint().apply {
+                        color = android.graphics.Color.YELLOW
+                        textSize = 28f
+                        isAntiAlias = true
+                    }
+                    canvas.drawText("FITS DATA: $objectName", 20f, 200f, paint)
+                    jpgFile.outputStream().use { os ->
+                        emptyBmp.compress(Bitmap.CompressFormat.JPEG, 90, os)
+                    }
+                }
+
+                val jsonFile = File(outputDir, "FITS_$timeStr.json")
+                val descStr = "Obserwacja w formacie FITS pobrana z serwera dla obiektu $objectName. Rozmiar bitstreamu: ${fitsBytes.size} bajtów."
+                val root = JSONObject().apply {
+                    put("timestamp", timestampStr)
+                    put("latitude", 50.3)
+                    put("longitude", 18.8)
+                    put("description", descStr)
+                    val arr = JSONArray().apply {
+                        put(JSONObject().apply {
+                            put("id", "fits_$timeStr")
+                            put("name", objectName)
+                            put("type", "FITS_Observation")
+                            put("magnitude", 19.5)
+                            put("ra", 45.0)
+                            put("dec", 20.0)
+                            put("description", descStr)
+                            val imgs = JSONArray().apply { put(fitsUrlStr) }
+                            put("imageUrls", imgs)
+                        })
+                    }
+                    put("detected_objects", arr)
+                }
+                jsonFile.writeText(root.toString(2))
+
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(context, "Pobrano FITS dla $objectName! Dodano do galerii.", Toast.LENGTH_SHORT).show()
+                    onComplete(true)
+                }
+            } else {
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(context, "Błąd pobierania FITS: HTTP ${conn.responseCode}", Toast.LENGTH_SHORT).show()
+                    onComplete(false)
+                }
+            }
+        } catch (e: Exception) {
+            Log.e("FitsDownload", "Błąd podczas pobierania strumienia FITS", e)
+            withContext(Dispatchers.Main) {
+                Toast.makeText(context, "Błąd pobierania: ${e.localizedMessage}", Toast.LENGTH_LONG).show()
+                onComplete(false)
+            }
+        }
+    }
+}
+
 fun loadPhotos(outputDir: File): List<PhotoItem> {
     val jpgFiles = outputDir.listFiles { file -> file.extension.equals("jpg", true) }
         ?.sortedByDescending { it.lastModified() } ?: emptyList()
@@ -661,7 +874,9 @@ fun fetchAllSavedCatalogObjects(
     context: Context,
     onAllSavedReceived: (List<Star>) -> Unit
 ) {
-    Toast.makeText(context, "Pobieram wszystkie zapisane obiekty z bazy...", Toast.LENGTH_SHORT).show()
+    android.os.Handler(android.os.Looper.getMainLooper()).post {
+        Toast.makeText(context, "Pobieram wszystkie zapisane obiekty z bazy...", Toast.LENGTH_SHORT).show()
+    }
 
     CoroutineScope(Dispatchers.IO).launch {
         try {
@@ -886,6 +1101,149 @@ fun fetchCatalogObjectDetails(
         }
     }
 }
+
+fun fetchObjectFitsFiles(
+    name: String,
+    onResult: (List<JSONObject>) -> Unit
+) {
+    CoroutineScope(Dispatchers.IO).launch {
+        try {
+            val encoded = Uri.encode(name.trim())
+            val urlString = "$API_URL/api/fits/objects?name=$encoded"
+            Log.d("FITS_API", "GET $urlString")
+            val conn = (URL(urlString).openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                connectTimeout = 30000
+                readTimeout = 30000
+                setRequestProperty("Accept", "application/json")
+            }
+
+            if (conn.responseCode in 200..299) {
+                val jsonStr = conn.inputStream.bufferedReader().use { it.readText() }
+                val root = JSONObject(jsonStr)
+                val filesArr = root.optJSONArray("files") ?: JSONArray()
+                val list = mutableListOf<JSONObject>()
+                for (i in 0 until filesArr.length()) {
+                    list.add(filesArr.getJSONObject(i))
+                }
+                withContext(Dispatchers.Main) {
+                    onResult(list)
+                }
+            } else {
+                withContext(Dispatchers.Main) {
+                    onResult(emptyList())
+                }
+            }
+        } catch (e: Exception) {
+            Log.e("FITS_API", "Błąd pobierania listy FITS dla obiektu", e)
+            withContext(Dispatchers.Main) {
+                onResult(emptyList())
+            }
+        }
+    }
+}
+
+fun requestAndDownloadObjectGif(
+    context: Context,
+    objectName: String,
+    onComplete: (Boolean) -> Unit
+) {
+    CoroutineScope(Dispatchers.IO).launch {
+        withContext(Dispatchers.Main) {
+            Toast.makeText(context, "Rozpoczynam generowanie timelapsa GIF dla $objectName...", Toast.LENGTH_SHORT).show()
+        }
+
+        try {
+            val encoded = Uri.encode(objectName.trim())
+            val postUrlStr = "$API_URL/api/gifs/jobs?name=$encoded"
+            Log.d("GIF_API", "POST $postUrlStr")
+
+            val postConn = (URL(postUrlStr).openConnection() as HttpURLConnection).apply {
+                requestMethod = "POST"
+                connectTimeout = 30000
+                readTimeout = 30000
+                setRequestProperty("Accept", "application/json")
+            }
+
+            if (postConn.responseCode !in 200..299) {
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(context, "Błąd startu zadania GIF: HTTP ${postConn.responseCode}", Toast.LENGTH_SHORT).show()
+                    onComplete(false)
+                }
+                return@launch
+            }
+
+            val respJson = postConn.inputStream.bufferedReader().use { it.readText() }
+            val root = JSONObject(respJson)
+            val jobId = root.optString("job_id")
+            if (jobId.isEmpty()) {
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(context, "Brak ID zadania GIF", Toast.LENGTH_SHORT).show()
+                    onComplete(false)
+                }
+                return@launch
+            }
+
+            withContext(Dispatchers.Main) {
+                Toast.makeText(context, "Zadanie w kolejce. Generowanie timelapse...", Toast.LENGTH_SHORT).show()
+            }
+
+            var status = "queued"
+            var gifFileUrl = ""
+            var attempts = 0
+            while ((status == "queued" || status == "running") && attempts < 40) {
+                attempts++
+                kotlinx.coroutines.delay(3000)
+
+                try {
+                    val statusUrlStr = "$API_URL/api/gifs/jobs/$jobId"
+                    val statusConn = (URL(statusUrlStr).openConnection() as HttpURLConnection).apply {
+                        requestMethod = "GET"
+                        connectTimeout = 15000
+                        readTimeout = 15000
+                        setRequestProperty("Accept", "application/json")
+                    }
+                    if (statusConn.responseCode in 200..299) {
+                        val statusStr = statusConn.inputStream.bufferedReader().use { it.readText() }
+                        val statusObj = JSONObject(statusStr)
+                        status = statusObj.optString("status", "error")
+                        if (status == "done") {
+                            val pathSuffix = statusObj.optString("gif_url")
+                            gifFileUrl = "$API_URL$pathSuffix"
+                        } else if (status == "error") {
+                            val err = statusObj.optString("error", "Nieznany błąd")
+                            withContext(Dispatchers.Main) {
+                                Toast.makeText(context, "Błąd generowania GIF: $err", Toast.LENGTH_LONG).show()
+                                onComplete(false)
+                            }
+                            return@launch
+                        }
+                    }
+                } catch (e: Exception) {
+                    Log.e("GIF_API", "Błąd sprawdzenia statusu", e)
+                }
+            }
+
+            if (status == "done" && gifFileUrl.isNotEmpty()) {
+                val outputDir = context.externalMediaDirs.firstOrNull()?.let { File(it, "SpaceAppsPhotos").apply { mkdirs() } } ?: context.filesDir
+                downloadFitsFileAndAddToGallery(context, gifFileUrl, outputDir, "${objectName}_Timelapse") { success ->
+                    onComplete(success)
+                }
+            } else {
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(context, "Timeout generowania GIF na serwerze", Toast.LENGTH_SHORT).show()
+                    onComplete(false)
+                }
+            }
+        } catch (e: Exception) {
+            Log.e("GIF_API", "Błąd procesu GIF", e)
+            withContext(Dispatchers.Main) {
+                Toast.makeText(context, "Błąd procesu GIF: ${e.localizedMessage}", Toast.LENGTH_LONG).show()
+                onComplete(false)
+            }
+        }
+    }
+}
 /**
  * Oblicza obiektywny Azymut i Wysokość (Altitude) tylnej kamery telefonu względem Północy Geograficznej.
  * Naprawia błąd, w którym zrobienie zdjęcia podawało ujemną wysokość (pod ziemią).
@@ -1035,7 +1393,8 @@ fun GalaxyPortalScreen(onEnterSpace: () -> Unit) {
 @Composable
 fun StarMapScreen(
     stars: List<Star>,
-    onBack: () -> Unit
+    onBack: () -> Unit,
+    onOpenGallery: () -> Unit = {}
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -1049,6 +1408,7 @@ fun StarMapScreen(
     var searchQuery by remember { mutableStateOf("") }
     var activeStars by remember { mutableStateOf(stars) }
     var selectedStar by remember { mutableStateOf<Star?>(null) }
+    var objectFitsFiles by remember { mutableStateOf<List<JSONObject>>(emptyList()) }
 
     // Aktywny cel wyszukiwania, do którego prowadzi strzałka kierunkowa
     var searchTargetStar by remember { mutableStateOf<Star?>(null) }
@@ -1116,6 +1476,7 @@ fun StarMapScreen(
 
     fun openStarDetails(star: Star) {
         selectedStar = star
+        objectFitsFiles = emptyList()
         fetchCatalogObjectDetails(star.name) { desc, urls, ra, dec ->
             val updated = star.copy(
                 description = desc.ifBlank { star.description },
@@ -1127,6 +1488,9 @@ fun StarMapScreen(
             if (searchTargetStar?.name.equals(updated.name, ignoreCase = true)) {
                 searchTargetStar = updated
             }
+        }
+        fetchObjectFitsFiles(star.name) { files ->
+            objectFitsFiles = files
         }
     }
 
@@ -1227,6 +1591,9 @@ fun StarMapScreen(
                     }
                 },
                 actions = {
+                    TextButton(onClick = onOpenGallery) {
+                        Text("GALERIA FITS", color = CosmicBlue, fontWeight = FontWeight.Bold)
+                    }
                     Button(
                         onClick = { onlyImportant = !onlyImportant },
                         colors = ButtonDefaults.buttonColors(
@@ -1769,20 +2136,114 @@ fun StarMapScreen(
                             if (star.imageUrls.isNotEmpty()) {
                                 Spacer(modifier = Modifier.height(10.dp))
                                 Text(
-                                    text = "Powiązane obrazy / dane (${star.imageUrls.size}):",
+                                    text = "Powiązane obrazy / animacje GIF (${star.imageUrls.size}):",
                                     style = MaterialTheme.typography.labelMedium,
                                     color = NebulaPurple,
                                     fontWeight = FontWeight.Bold
                                 )
+                                Spacer(modifier = Modifier.height(6.dp))
                                 star.imageUrls.forEach { url ->
-                                    Text(
-                                        text = "• $url",
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = CosmicBlue,
-                                        modifier = Modifier.padding(top = 2.dp)
-                                    )
+                                    Card(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(vertical = 4.dp),
+                                        colors = CardDefaults.cardColors(containerColor = SpaceBlack),
+                                        border = androidx.compose.foundation.BorderStroke(1.dp, CosmicBlue.copy(alpha = 0.5f)),
+                                        shape = RoundedCornerShape(12.dp)
+                                    ) {
+                                        Column(modifier = Modifier.padding(6.dp)) {
+                                            AsyncImage(
+                                                model = ImageRequest.Builder(context)
+                                                    .data(url)
+                                                    .crossfade(true)
+                                                    .decoderFactory(GifDecoder.Factory())
+                                                    .build(),
+                                                contentDescription = null,
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .height(180.dp),
+                                                contentScale = ContentScale.Fit
+                                            )
+                                            Spacer(modifier = Modifier.height(4.dp))
+                                            Text(
+                                                text = url,
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = CosmicBlue
+                                            )
+                                        }
+                                    }
                                 }
                             }
+
+                            Spacer(modifier = Modifier.height(10.dp))
+                            Button(
+                                onClick = {
+                                    requestAndDownloadObjectGif(context, star.name) { success ->
+                                        if (success) {
+                                            selectedStar = null
+                                        }
+                                    }
+                                },
+                                colors = ButtonDefaults.buttonColors(containerColor = CosmicBlue),
+                                shape = RoundedCornerShape(12.dp),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Text("WYGENERUJ I POBIERZ TIMELAPSE GIF", color = SpaceBlack, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                            }
+
+                            if (objectFitsFiles.isNotEmpty()) {
+                                Spacer(modifier = Modifier.height(10.dp))
+                                Text(
+                                    text = "Pliki FITS w bazie danych (${objectFitsFiles.size}):",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = NebulaPurple,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Spacer(modifier = Modifier.height(4.dp))
+                                objectFitsFiles.forEach { fileObj ->
+                                    val fileId = fileObj.optInt("id")
+                                    val title = fileObj.optString("title", "Obserwacja FITS")
+                                    val remoteUrl = fileObj.optString("remote_url")
+                                    val status = fileObj.optString("status", "unknown")
+                                    val band = fileObj.optString("wavelength_band", "")
+
+                                    Card(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(vertical = 4.dp),
+                                        colors = CardDefaults.cardColors(containerColor = SpaceBlack),
+                                        border = androidx.compose.foundation.BorderStroke(1.dp, CosmicBlue.copy(alpha = 0.5f)),
+                                        shape = RoundedCornerShape(10.dp)
+                                    ) {
+                                        Column(modifier = Modifier.padding(10.dp)) {
+                                            Text(text = title, style = MaterialTheme.typography.bodySmall, color = StarWhite, fontWeight = FontWeight.Bold)
+                                            if (band.isNotEmpty()) {
+                                                Text(text = "Pasmo: $band | Status: $status", style = MaterialTheme.typography.labelSmall, color = CosmicBlue)
+                                            }
+                                            Spacer(modifier = Modifier.height(6.dp))
+                                            Button(
+                                                onClick = {
+                                                    val downloadUrl = if (fileObj.has("download_url")) fileObj.optString("download_url") else remoteUrl
+                                                    val outputDir = context.externalMediaDirs.firstOrNull()?.let { File(it, "SpaceAppsPhotos").apply { mkdirs() } } ?: context.filesDir
+                                                    downloadFitsFileAndAddToGallery(context, downloadUrl, outputDir, "${star.name}_$fileId") { success ->
+                                                        if (success) {
+                                                            Toast.makeText(context, "Dodano FITS do galerii!", Toast.LENGTH_SHORT).show()
+                                                            selectedStar = null
+                                                        }
+                                                    }
+                                                },
+                                                colors = ButtonDefaults.buttonColors(containerColor = CosmicBlue),
+                                                shape = RoundedCornerShape(12.dp),
+                                                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 12.dp, vertical = 4.dp)
+                                            ) {
+                                                Text("POBIERZ FITS DO GALERII", color = SpaceBlack, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            Spacer(modifier = Modifier.height(12.dp))
                         }
                     },
                     containerColor = SpaceDarkSurface,
@@ -1798,7 +2259,6 @@ fun StarMapScreen(
 @Composable
 fun CameraView(
     outputDirectory: File,
-    onPhotoCaptured: (PhotoItem) -> Unit,
     onStarsReceived: (List<Star>) -> Unit,
     onOpenGallery: () -> Unit,
     photoCount: Int
@@ -1806,28 +2266,16 @@ fun CameraView(
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val cameraProviderFuture = remember { ProcessCameraProvider.getInstance(context) }
-    var imageCapture by remember { mutableStateOf<ImageCapture?>(null) }
     var cameraControl by remember { mutableStateOf<androidx.camera.core.CameraControl?>(null) }
     var cameraInfo by remember { mutableStateOf<androidx.camera.core.CameraInfo?>(null) }
     val executor = remember { ContextCompat.getMainExecutor(context) }
 
-    // Stan przybliżenia (Zoom) aparatu
     var zoomRatio by remember { mutableFloatStateOf(1f) }
     var maxZoomRatio by remember { mutableFloatStateOf(8f) }
 
     var currentLat by remember { mutableStateOf<Double?>(null) }
     var currentLon by remember { mutableStateOf<Double?>(null) }
     var currentAltMeters by remember { mutableStateOf(250.0) }
-    var azimuth by remember { mutableFloatStateOf(0f) }
-    var altitude by remember { mutableFloatStateOf(0f) }
-    var roll by remember { mutableFloatStateOf(0f) }
-
-    var accelX by remember { mutableFloatStateOf(0f) }
-    var accelY by remember { mutableFloatStateOf(0f) }
-    var accelZ by remember { mutableFloatStateOf(0f) }
-    var gyroX by remember { mutableFloatStateOf(0f) }
-    var gyroY by remember { mutableFloatStateOf(0f) }
-    var gyroZ by remember { mutableFloatStateOf(0f) }
 
     val liveSensorState = remember {
         object {
@@ -1876,8 +2324,6 @@ fun CameraView(
                             lon = lon,
                             altMeters = currentAltMeters
                         )
-                        azimuth = trueAz
-                        altitude = trueAlt
                         liveSensorState.az = trueAz
                         liveSensorState.alt = trueAlt
 
@@ -1885,25 +2331,17 @@ fun CameraView(
                         SensorManager.getRotationMatrixFromVector(rotMat, event.values)
                         val ori = FloatArray(3)
                         SensorManager.getOrientation(rotMat, ori)
-                        val rDeg = Math.toDegrees(ori[2].toDouble()).toFloat()
-                        roll = rDeg
-                        liveSensorState.rl = rDeg
+                        liveSensorState.rl = Math.toDegrees(ori[2].toDouble()).toFloat()
                     }
                     Sensor.TYPE_ACCELEROMETER -> {
-                        accelX = event.values[0]
-                        accelY = event.values[1]
-                        accelZ = event.values[2]
-                        liveSensorState.ax = accelX
-                        liveSensorState.ay = accelY
-                        liveSensorState.azc = accelZ
+                        liveSensorState.ax = event.values[0]
+                        liveSensorState.ay = event.values[1]
+                        liveSensorState.azc = event.values[2]
                     }
                     Sensor.TYPE_GYROSCOPE -> {
-                        gyroX = event.values[0]
-                        gyroY = event.values[1]
-                        gyroZ = event.values[2]
-                        liveSensorState.gx = gyroX
-                        liveSensorState.gy = gyroY
-                        liveSensorState.gz = gyroZ
+                        liveSensorState.gx = event.values[0]
+                        liveSensorState.gy = event.values[1]
+                        liveSensorState.gz = event.values[2]
                     }
                 }
             }
@@ -1924,7 +2362,6 @@ fun CameraView(
         topBar = {
             TopAppBar(
                 title = {
-                    // Kliknięcie w COSMIC EXPLORER otwiera mapę wszystkich zapisanych obiektów z bazy
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         modifier = Modifier.clickable {
@@ -1946,7 +2383,7 @@ fun CameraView(
                             border = androidx.compose.foundation.BorderStroke(1.dp, CosmicBlue)
                         ) {
                             Text(
-                                text = "WSZYSTKIE",
+                                text = "KATALOG",
                                 color = CosmicBlue,
                                 style = MaterialTheme.typography.labelSmall,
                                 modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
@@ -1973,7 +2410,6 @@ fun CameraView(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(paddingValues)
-                // Obsługa gestu szczypania dwoma palcami (Pinch-to-Zoom)
                 .pointerInput(maxZoomRatio) {
                     detectTransformGestures { _, _, zoomChange, _ ->
                         val newZoom = (zoomRatio * zoomChange).coerceIn(1f, maxZoomRatio)
@@ -1998,14 +2434,12 @@ fun CameraView(
                         val preview = Preview.Builder().build().also {
                             it.setSurfaceProvider(previewView.surfaceProvider)
                         }
-                        imageCapture = ImageCapture.Builder().build()
                         try {
                             cameraProvider.unbindAll()
                             val camera = cameraProvider.bindToLifecycle(
                                 lifecycleOwner,
                                 CameraSelector.DEFAULT_BACK_CAMERA,
-                                preview,
-                                imageCapture
+                                preview
                             )
                             cameraControl = camera.cameraControl
                             cameraInfo = camera.cameraInfo
@@ -2017,7 +2451,7 @@ fun CameraView(
                 }
             )
 
-            // Celownik na środku ekranu (górny HUD usunięty zgodnie z prośbą)
+            // Celownik na środku ekranu
             Canvas(modifier = Modifier.fillMaxSize()) {
                 val cx = size.width / 2f
                 val cy = size.height / 2f
@@ -2034,7 +2468,7 @@ fun CameraView(
                 )
             }
 
-            // Dolny panel: suwak zoomu + przyciski akcji
+            // Dolny panel z dwoma przyciskami: MAPA AR i GALERIA (BEZ PRZYCISKU FOTO!)
             Column(
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
@@ -2043,7 +2477,6 @@ fun CameraView(
                     .padding(top = 8.dp, bottom = 18.dp, start = 16.dp, end = 16.dp),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                // Suwak Zoomu (1.0x .. maxZoom)
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     modifier = Modifier
@@ -2081,7 +2514,7 @@ fun CameraView(
                     }
                 }
 
-                Spacer(modifier = Modifier.height(6.dp))
+                Spacer(modifier = Modifier.height(10.dp))
 
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -2113,89 +2546,28 @@ fun CameraView(
                                 onAllSkyStarsReceived = onStarsReceived
                             )
                         },
-                        colors = ButtonDefaults.buttonColors(containerColor = SpaceDarkSurface),
-                        shape = RoundedCornerShape(16.dp)
-                    ) {
-                        Text("SEKTOR AR", color = CosmicBlue, fontWeight = FontWeight.Bold)
-                    }
-
-                    Button(
-                        onClick = {
-                            val capture = imageCapture ?: return@Button
-                            val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
-                            val photoFile = File(outputDirectory, "COSMIC_$stamp.jpg")
-                            val jsonFile = File(outputDirectory, "COSMIC_$stamp.json")
-                            val outputOptions = ImageCapture.OutputFileOptions.Builder(photoFile).build()
-
-                            val snapLat = liveSensorState.lat
-                            val snapLon = liveSensorState.lon
-                            val snapAz = liveSensorState.az
-                            val snapAlt = liveSensorState.alt
-                            val snapRoll = liveSensorState.rl
-                            val snapAx = liveSensorState.ax
-                            val snapAy = liveSensorState.ay
-                            val snapAzc = liveSensorState.azc
-                            val snapGx = liveSensorState.gx
-                            val snapGy = liveSensorState.gy
-                            val snapGz = liveSensorState.gz
-
-                            capture.takePicture(
-                                outputOptions,
-                                executor,
-                                object : ImageCapture.OnImageSavedCallback {
-                                    override fun onImageSaved(outputFileResults: ImageCapture.OutputFileResults) {
-                                        val photoItem = PhotoItem(
-                                            imageFile = photoFile,
-                                            jsonFile = jsonFile,
-                                            timestamp = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date()),
-                                            latitude = snapLat,
-                                            longitude = snapLon,
-                                            azimuth = snapAz,
-                                            pitch = snapAlt,
-                                            roll = snapRoll,
-                                            accelX = snapAx,
-                                            accelY = snapAy,
-                                            accelZ = snapAzc,
-                                            gyroX = snapGx,
-                                            gyroY = snapGy,
-                                            gyroZ = snapGz
-                                        )
-                                        savePhotoMetadata(photoItem)
-                                        onPhotoCaptured(photoItem)
-                                        queryAllSurroundingSkyObjects(
-                                            context = context,
-                                            photoItem = photoItem,
-                                            saveToDisk = true,
-                                            onAllSkyStarsReceived = onStarsReceived
-                                        )
-                                    }
-
-                                    override fun onError(exception: ImageCaptureException) {
-                                        Log.e("CameraView", "Błąd zapisu zdjęcia", exception)
-                                        Toast.makeText(context, "Błąd zapisu zdjęcia", Toast.LENGTH_SHORT).show()
-                                    }
-                                }
-                            )
-                        },
                         colors = ButtonDefaults.buttonColors(containerColor = CosmicBlue),
-                        shape = RoundedCornerShape(50),
-                        modifier = Modifier.height(60.dp)
+                        shape = RoundedCornerShape(24.dp),
+                        modifier = Modifier.weight(1f).height(54.dp).padding(end = 6.dp)
                     ) {
-                        Text("FOTO + AR", color = SpaceBlack, fontWeight = FontWeight.Bold)
+                        Text("MAPA AR", color = SpaceBlack, fontWeight = FontWeight.Bold)
                     }
 
                     Button(
                         onClick = onOpenGallery,
                         colors = ButtonDefaults.buttonColors(containerColor = SpaceDarkSurface),
-                        shape = RoundedCornerShape(16.dp)
+                        shape = RoundedCornerShape(24.dp),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, CosmicBlue),
+                        modifier = Modifier.weight(1f).height(54.dp).padding(start = 6.dp)
                     ) {
-                        Text("GALERIA", color = CosmicBlue, fontWeight = FontWeight.Bold)
+                        Text("GALERIA", color = StarWhite, fontWeight = FontWeight.Bold)
                     }
                 }
             }
         }
     }
 }
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun GalleryScreen(
