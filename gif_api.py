@@ -78,8 +78,22 @@ def source_files(name):
             "Brak minimum 2 obserwacji w tym samym pasmie"
         )
 
+    # Preferujemy pasmo z najwieksza liczba
+    # plikow juz pobranych na serwer
+
+    best_group = max(
+        groups,
+        key=lambda group: (
+            sum(
+                1 for f in group
+                if f.get("status") == "downloaded"
+            ),
+            len(group)
+        )
+    )
+
     files = sorted(
-        max(groups, key=len),
+        best_group,
         key=lambda r: r.get("observed_at") or ""
     )
 

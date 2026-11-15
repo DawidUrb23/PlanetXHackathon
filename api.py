@@ -217,4 +217,3 @@ def search_objects(
             detail="Blad wyszukiwania danych NASA"
         )
 
-app.include_router(catalog_router)
