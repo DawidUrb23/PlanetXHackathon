@@ -1,10 +1,14 @@
 import numpy as np
-
+from pathlib import Path
 from astropy.io import fits
 from astropy.wcs import WCS
 from reproject import reproject_interp
-from FitsTools.FitsToGif.fits_loader import load_image
-from pathlib import Path
+
+# Zamiast "from .fits_loader import load_image":
+try:
+    from .fits_loader import load_image
+except ImportError:
+    from fits_loader import load_image
 
 def align_folder(folder, reference_path):
 
