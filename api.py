@@ -6,11 +6,17 @@ from fastapi import FastAPI, HTTPException, Query
 from nasa_asteroid_service import get_asteroids
 from asteroid_details_service import get_asteroid_details
 from catalog_api import router as catalog_router
-
+from fits_api import router as fits_router
+from fits_object_api import router as fits_object_router
+from gif_api import router as gif_router
 
 app = FastAPI(title="NASA Space Apps API")
 
+app.include_router(catalog_router)
+app.include_router(fits_router)
 app.include_router(featured_router)
+app.include_router(fits_object_router)
+app.include_router(gif_router)
 # --------------------------------------------------
 # 1. Sprawdzenie działania serwera
 # --------------------------------------------------

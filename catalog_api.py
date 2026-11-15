@@ -526,7 +526,7 @@ def get_catalog_objects(
     limit: int = Query(50, ge=1, le=200),
     lat: float = Query(50.3, ge=-90, le=90),
     lon: float = Query(18.8, ge=-180, le=180),
-    query_nasa: bool = Query(True),
+    query_nasa: bool = Query(False),
 ):
     try:
         rows = _list_db(name, ra, dec, radius, limit)
@@ -718,7 +718,9 @@ def save_nasa_objects(objects, observation_time):
     return ids
 
 
-@router.get('/scan-or-fetch')
+
+
+@router.get("/scan-or-fetch")
 def scan_or_fetch_sky(
     ra: float = Query(..., ge=0, lt=360),
     dec: float = Query(..., ge=-90, le=90),
@@ -731,7 +733,69 @@ def scan_or_fetch_sky(
     fetch_spherex: bool = Query(False),
 ):
     now = datetime.now(timezone.utc)
-    observed = now.replace(minute=(now.minute // 5) * 5, second=0, microsecond=0)
+
+    observed = now.replace(
+        minute=(now.minute // 5) * 5,
+        second=0,
+        microsecond=0
+    )
+
+    print(
+        f"SCAN: RA={ra}, Dec={dec}, "
+        f"radius={radius}, force_nasa={always_fetch_nasa}",
+        flush=True
+    )
+
+    # ==========================================
+    # 1. SPRAWDZAMY LOKALNA BAZE
+    # ==========================================
+
+    try:
+        local_objects = _list_db(
+            ra=ra,
+            dec=dec,
+            radius=radius,
+            limit=limit
+        )
+
+    except Exception as exc:
+        print("POSTGRES ERROR:", repr(exc), flush=True)
+
+        raise HTTPException(
+            status_code=500,
+            detail="Blad odczytu PostgreSQL"
+        ) from exc
+
+    print(
+        f"POSTGRES: znaleziono {len(local_objects)} obiektow",
+        flush=True
+    )
+
+    # Jesli mamy obiekty i nie wymuszamy NASA,
+    # zwracamy dane bez wykonywania nowego zapytania.
+    if local_objects and not always_fetch_nasa:
+
+        print("CACHE HIT - dane z PostgreSQL", flush=True)
+
+        return {
+            "source": "local_db",
+            "count": len(local_objects),
+            "asteroids": local_objects,
+            "observation_time": observed.isoformat(),
+            "nasa_queried": False,
+            "stale": True,
+            "spherex_status": "not_requested"
+        }
+
+    # ==========================================
+    # 2. BRAK OBIEKTOW LUB WYMUSZONE NASA
+    # ==========================================
+
+    print(
+        "NASA FETCH - pobieram dane z NASA JPL",
+        flush=True
+    )
+
     try:
         response = get_asteroids(
             latitude=lat,
@@ -742,51 +806,109 @@ def scan_or_fetch_sky(
             dec_center=dec_to_nasa(dec),
             ra_half_width=min(max(radius / 2, 0.5), 2.5),
             dec_half_width=min(max(radius / 2, 0.5), 2.5),
-            magnitude_limit=17.5,
+            magnitude_limit=17.5
         )
-        data = response.get('data', {})
+
+        data = response.get("data", {})
+        nasa_objects = data.get("objects", [])
+
+        # Maksymalnie 20 wynikow
         selected = sorted(
-            data.get('objects', []),
-            key=lambda x: float(x.get('distance_from_center_deg') if x.get('distance_from_center_deg') is not None else 1e9),
+            nasa_objects,
+            key=lambda x: float(
+                x.get("distance_from_center_deg")
+                if x.get("distance_from_center_deg") is not None
+                else 1e9
+            )
         )[:limit]
-        ids = save_nasa_objects(selected, observed) if selected else {}
-        items = [
-            {
-                'id': str(ids[str(o['name']).strip()]),
-                'name': str(o['name']).strip(),
-                'designation': str(o['name']).strip(),
-                'object_type': 'asteroid',
-                'description': 'Asteroida NASA JPL',
-                'ra': ra_to_deg(o['ra']),
-                'dec': dec_to_deg(o['dec']),
-                'sep_deg': o.get('distance_from_center_deg'),
-                'magnitude': o.get('magnitude'),
-                'images': [],
-                'observed_at': observed.isoformat(),
-                'data_source': response.get('source', 'nasa'),
-                'position_current': True,
-            }
-            for o in selected
-        ]
+
+        print(
+            f"NASA: znaleziono {len(selected)} asteroid",
+            flush=True
+        )
+
+        # ======================================
+        # 3. ZAPIS DANYCH DO POSTGRESQL
+        # ======================================
+
+        ids = (
+            save_nasa_objects(selected, observed)
+            if selected else {}
+        )
+
+        items = []
+
+        for obj in selected:
+            name = str(obj["name"]).strip()
+
+            items.append({
+                "id": str(ids[name]),
+                "name": name,
+                "designation": name,
+                "object_type": "asteroid",
+                "description": "Asteroida NASA JPL",
+                "ra": ra_to_deg(obj["ra"]),
+                "dec": dec_to_deg(obj["dec"]),
+                "sep_deg": obj.get(
+                    "distance_from_center_deg"
+                ),
+                "magnitude": obj.get("magnitude"),
+                "images": [],
+                "observed_at": observed.isoformat(),
+                "data_source": response.get(
+                    "source", "nasa"
+                ),
+                "position_current": (
+                    response.get("source") != "cache"
+                )
+            })
+
+        print(
+            f"POSTGRES: zapisano/odswiezono "
+            f"{len(items)} asteroid",
+            flush=True
+        )
+
         return {
-            'source': response.get('source', 'nasa'),
-            'count': len(items),
-            'asteroids': items,
-            'observation_time': observed.isoformat(),
-            'spherex_status': 'separate_endpoint' if fetch_spherex else 'not_requested',
+            "source": response.get("source", "nasa"),
+            "count": len(items),
+            "asteroids": items,
+            "observation_time": observed.isoformat(),
+            "nasa_queried": True,
+            "stale": response.get("source") == "cache",
+            "spherex_status": (
+                "separate_endpoint"
+                if fetch_spherex
+                else "not_requested"
+            )
         }
+
+    # ==========================================
+    # 4. AWARIA NASA - DANE LOKALNE
+    # ==========================================
+
     except Exception as exc:
-        print('SCAN OR FETCH ERROR', repr(exc))
-        try:
-            old = _list_db(ra=ra, dec=dec, radius=radius, limit=limit)
-        except Exception:
-            old = []
-        if old:
+
+        print("NASA FETCH ERROR:", repr(exc), flush=True)
+
+        if local_objects:
+
+            print(
+                "NASA OFFLINE - zwracam PostgreSQL",
+                flush=True
+            )
+
             return {
-                'source': 'local_fallback_stale',
-                'count': len(old),
-                'asteroids': old,
-                'observation_time': observed.isoformat(),
-                'stale': True,
+                "source": "local_fallback_stale",
+                "count": len(local_objects),
+                "asteroids": local_objects,
+                "observation_time": observed.isoformat(),
+                "nasa_queried": True,
+                "stale": True,
+                "spherex_status": "not_requested"
             }
-        raise HTTPException(status_code=503, detail='NASA JPL niedostepna; brak danych w lokalnym katalogu')
+
+        raise HTTPException(
+            status_code=503,
+            detail="NASA JPL niedostepna i brak danych lokalnych"
+        ) from exc
