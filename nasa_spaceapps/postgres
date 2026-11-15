@@ -1,0 +1,173 @@
+-- 1. Źródła danych astronomicznych
+CREATE TABLE IF NOT EXISTS data_sources (
+    id SERIAL PRIMARY KEY,
+    name VARCHAR(150) NOT NULL,
+    provider VARCHAR(100),
+    source_url TEXT NOT NULL
+);
+
+-- 2. Obiekty astronomiczne
+CREATE TABLE IF NOT EXISTS celestial_objects (
+    id SERIAL PRIMARY KEY,
+    name VARCHAR(200) NOT NULL,
+    object_type VARCHAR(50) NOT NULL,
+    nasa_identifier VARCHAR(100),
+    description TEXT,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- 3. Zdjęcia obiektów
+CREATE TABLE IF NOT EXISTS images (
+    id SERIAL PRIMARY KEY,
+    object_id INTEGER REFERENCES celestial_objects(id),
+    source_id INTEGER REFERENCES data_sources(id),
+    title VARCHAR(250),
+    image_url TEXT NOT NULL,
+    description TEXT,
+    captured_at TIMESTAMPTZ
+);
+
+-- 4. Obserwacje astronomiczne
+CREATE TABLE IF NOT EXISTS observations (
+    id SERIAL PRIMARY KEY,
+    object_id INTEGER REFERENCES celestial_objects(id),
+    source_id INTEGER REFERENCES data_sources(id),
+    observed_at TIMESTAMPTZ,
+    ra DOUBLE PRECISION,
+    dec DOUBLE PRECISION,
+    wavelength_band VARCHAR(100),
+    data_url TEXT
+);
+
+CREATE TABLE IF NOT EXISTS asteroid_cache (
+    id BIGSERIAL PRIMARY KEY,
+    query_hash VARCHAR(64) NOT NULL UNIQUE,
+    query_params JSONB NOT NULL,
+    response_data JSONB NOT NULL,
+    nasa_source VARCHAR(200) NOT NULL,
+    fetched_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    expires_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_asteroid_cache_expires
+ON asteroid_cache(expires_at);
+
+CREATE TABLE IF NOT EXISTS asteroid_details_cache (
+    id BIGSERIAL PRIMARY KEY,
+    lookup_key VARCHAR(150) NOT NULL UNIQUE,
+    response_data JSONB NOT NULL,
+    fetched_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    expires_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS spherex_cache (
+    id BIGSERIAL PRIMARY KEY,
+    query_hash VARCHAR(64) NOT NULL UNIQUE,
+    query_params JSONB NOT NULL,
+    response_data JSONB NOT NULL,
+    fetched_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    expires_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_spherex_cache_expires
+ON spherex_cache(expires_at);
+
+
+-- 9. Katalog znanych obiektow astronomicznych NASA
+CREATE TABLE IF NOT EXISTS featured_sky_objects (
+    object_key VARCHAR(32) PRIMARY KEY,
+    name VARCHAR(160) NOT NULL,
+    designation VARCHAR(80) NOT NULL,
+    object_type VARCHAR(40) NOT NULL,
+    is_moving BOOLEAN NOT NULL DEFAULT FALSE,
+
+    ra_deg DOUBLE PRECISION,
+    dec_deg DOUBLE PRECISION,
+
+    image_url TEXT,
+    image_source_url TEXT NOT NULL,
+    image_verified BOOLEAN NOT NULL DEFAULT FALSE,
+
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+    CONSTRAINT featured_ra_range
+        CHECK (
+            ra_deg IS NULL
+            OR (ra_deg >= 0 AND ra_deg < 360)
+        ),
+
+    CONSTRAINT featured_dec_range
+        CHECK (
+            dec_deg IS NULL
+            OR (dec_deg >= -90 AND dec_deg <= 90)
+        )
+);
+
+CREATE INDEX IF NOT EXISTS idx_featured_name
+ON featured_sky_objects(name);
+
+
+-- Tabela przechowujaca informacje o plikach FITS z NASA SPHEREx
+
+CREATE TABLE IF NOT EXISTS fits_assets (
+    id BIGSERIAL PRIMARY KEY,
+
+    -- Adres oryginalnego pliku w NASA
+    remote_url TEXT NOT NULL UNIQUE,
+
+    -- Kolekcja, np. SPHEREx DR1
+    collection VARCHAR(60) NOT NULL,
+
+    -- Wspolrzedne astronomiczne
+    ra_center DOUBLE PRECISION,
+    dec_center DOUBLE PRECISION,
+
+    -- Informacje o pliku
+    title TEXT,
+    mime_type TEXT,
+    size_bytes BIGINT,
+
+    -- Lokalizacja pobranego pliku na serwerze
+    local_path TEXT,
+
+    -- Status pobierania
+    status VARCHAR(20) NOT NULL DEFAULT 'remote'
+        CHECK (status IN ('remote', 'downloaded')),
+
+    -- Daty
+    discovered_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    downloaded_at TIMESTAMPTZ
+);
+
+-- Indeks przyspieszajacy wyszukiwanie
+CREATE INDEX IF NOT EXISTS idx_fits_assets_collection
+ON fits_assets(collection);
+
+
+CREATE TABLE IF NOT EXISTS fits_object_links (
+    id BIGSERIAL PRIMARY KEY,
+
+    fits_asset_id BIGINT NOT NULL
+        REFERENCES fits_assets(id) ON DELETE CASCADE,
+
+    object_ref TEXT NOT NULL,
+    object_name TEXT NOT NULL,
+
+    target_ra DOUBLE PRECISION NOT NULL,
+    target_dec DOUBLE PRECISION NOT NULL,
+
+    observed_at TIMESTAMPTZ,
+    wavelength_band TEXT,
+
+    match_method TEXT NOT NULL
+        DEFAULT 'spherex_footprint',
+
+    linked_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+    UNIQUE(fits_asset_id, object_ref)
+);
+
+CREATE INDEX IF NOT EXISTS idx_fits_object_links_ref
+ON fits_object_links(object_ref);
+
+
