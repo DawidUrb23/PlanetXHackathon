@@ -1,0 +1,26 @@
+# REST API
+fastapi
+uvicorn
+requests
+python-dotenv
+
+# PostgreSQL
+psycopg[binary]
+psycopg2-binary
+
+# NASA IRSA / SPHEREx
+astroquery
+astropy
+pyvo
+
+# Data processing
+numpy
+pandas
+
+# FITS processing and image alignment
+reproject
+matplotlib
+
+# GIF generation
+imageio
+Pillow
